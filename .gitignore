@@ -1,0 +1,56 @@
+# Virtual environment
+venv/
+
+# Whisper model files (large binaries — download separately)
+models/*.pt
+
+# Personal / runtime state
+settings.json
+settings.local.json
+history/
+history.txt
+stats.json
+custom_dictionary.json
+snippets.json
+models/firstBootSettings.json
+
+# Logs
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.exe
+
+# Dev / internal folders
+backup/
+export/
+Documentation/
+packaging/
+tests/
+tools/
+
+# Launchers with hardcoded system paths (users create their own)
+run.bat
+*.vbs
+
+# Planning / internal docs (keep README.md only)
+*.md
+!README.md
+
+# Internal project docs
+REQUIREMENTS.txt
+NeuraType_Portable_Packaging_Plan.md
+
+# Claude AI session data
+.claude/
+
+# Environment / API key files
+.env
+.env.*

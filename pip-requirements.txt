@@ -1,0 +1,52 @@
+# NeuraType — Pinned Dependencies
+# Install:  pip install -r pip-requirements.txt
+# Note: torch requires CUDA 12.6 — install separately:
+#   pip install torch==2.10.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+
+annotated-types==0.7.0
+anyio==4.12.1
+certifi==2026.1.4
+cffi==2.0.0
+charset-normalizer==3.4.4
+colorama==0.4.6
+darkdetect==0.8.0
+distro==1.9.0
+filelock==3.20.0
+fsspec==2025.12.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.11
+Jinja2==3.1.6
+jiter==0.13.0
+keyboard==0.13.5
+llvmlite==0.46.0
+MarkupSafe==2.1.5
+more-itertools==10.8.0
+mpmath==1.3.0
+networkx==3.6.1
+numba==0.63.1
+numpy==2.3.5
+openai==2.24.0
+openai-whisper==20250625
+packaging==26.0
+pillow==12.1.1
+PyAudio==0.2.14
+pycparser==3.0
+pydantic==2.12.5
+pydantic_core==2.41.5
+pyperclip==1.11.0
+PyQt6==6.10.2
+PyQt6-Qt6==6.10.2
+PyQt6_sip==13.11.0
+regex==2026.1.15
+requests==2.32.5
+sniffio==1.3.1
+sounddevice==0.5.5
+soundfile==0.13.1
+sympy==1.14.0
+tiktoken==0.12.0
+tqdm==4.67.3
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+urllib3==2.6.3
