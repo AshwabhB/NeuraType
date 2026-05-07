@@ -4,6 +4,7 @@ import random
 import os
 import re
 import threading
+import subprocess
 import keyboard
 
 # IMPORTANT: Import backend BEFORE PyQt6 to avoid DLL conflicts.
@@ -379,6 +380,7 @@ class BackendSignals(QObject):
     history_hotkey_triggered = pyqtSignal()
     repaste_hotkey_triggered = pyqtSignal()
     transcription_stats = pyqtSignal(float, int, int)
+    refresh_hotkey_triggered = pyqtSignal()
 
 
 # =========================================================================
@@ -788,6 +790,10 @@ class SettingsWindow(QDialog):
         self._history_hk_input = QLineEdit()
         gl.addWidget(self._history_hk_input, 3, 1)
 
+        gl.addWidget(QLabel("Refresh Hotkeys:"), 4, 0)
+        self._refresh_hk_input = QLineEdit()
+        gl.addWidget(self._refresh_hk_input, 4, 1)
+
         lay.addWidget(g)
 
         g2 = QGroupBox("Hotkey Mode")
@@ -1147,6 +1153,7 @@ class SettingsWindow(QDialog):
         self._cancel_hk_input.setText(s.get("cancel_hotkey", DEFAULT_CANCEL_HOTKEY))
         self._repaste_hk_input.setText(s.get("repaste_hotkey", "alt+shift+z"))
         self._history_hk_input.setText(s.get("history_hotkey", "ctrl+shift+h"))
+        self._refresh_hk_input.setText(s.get("refresh_hotkey", "ctrl+alt+z"))
         self._mode_combo.setCurrentText(s.get("hotkey_mode", "toggle"))
         self._hk_enabled_cb.setChecked(s.get("hotkey_enabled", True))
         self._auto_paste_cb.setChecked(s.get("auto_paste", True))
@@ -1402,6 +1409,7 @@ class SettingsWindow(QDialog):
         s["cancel_hotkey"] = self._cancel_hk_input.text().strip() or DEFAULT_CANCEL_HOTKEY
         s["repaste_hotkey"] = self._repaste_hk_input.text().strip() or "alt+shift+z"
         s["history_hotkey"] = self._history_hk_input.text().strip() or "ctrl+shift+h"
+        s["refresh_hotkey"] = self._refresh_hk_input.text().strip() or "ctrl+alt+z"
         s["hotkey_mode"] = self._mode_combo.currentText()
         s["hotkey_enabled"] = self._hk_enabled_cb.isChecked()
         s["auto_paste"] = self._auto_paste_cb.isChecked()
@@ -1430,6 +1438,16 @@ class SettingsWindow(QDialog):
 
         # Apply auto-start
         TranscriberBackend.set_auto_start(s["auto_start"])
+
+        # Unregister old repaste/history/refresh hotkeys using OLD values before overwriting
+        _old_repaste = self.backend.settings.get("repaste_hotkey", "alt+shift+z")
+        _old_history = self.backend.settings.get("history_hotkey", "ctrl+shift+h")
+        _old_refresh = self.backend.settings.get("refresh_hotkey", "ctrl+alt+z")
+        for _hk in (_old_repaste, _old_history, _old_refresh):
+            try:
+                keyboard.remove_hotkey(_hk)
+            except Exception:
+                pass
 
         # Update backend state
         self.backend.settings = s
@@ -1743,6 +1761,7 @@ class NeuraTypeWindow(QMainWindow):
         self._signals.history_hotkey_triggered.connect(self._show_history)
         self._signals.repaste_hotkey_triggered.connect(self._repaste)
         self._signals.transcription_stats.connect(self._on_stats)
+        self._signals.refresh_hotkey_triggered.connect(self._refresh_hotkeys)
 
         # Initialize tray early so _on_status callbacks during backend init don't crash
         self._tray = None
@@ -1773,6 +1792,7 @@ class NeuraTypeWindow(QMainWindow):
             on_history_hotkey_triggered=lambda: self._signals.history_hotkey_triggered.emit(),
             on_repaste_hotkey_triggered=lambda: self._signals.repaste_hotkey_triggered.emit(),
             on_transcription_stats=lambda t, w, tw: self._signals.transcription_stats.emit(t, w, tw),
+            on_refresh_hotkey_triggered=lambda: self._signals.refresh_hotkey_triggered.emit(),
         )
 
         # Apply saved settings to UI
@@ -2057,6 +2077,9 @@ class NeuraTypeWindow(QMainWindow):
         refresh_hk_action.triggered.connect(self._refresh_hotkeys)
         menu.addAction(refresh_hk_action)
         menu.addSeparator()
+        relaunch_action = QAction("Relaunch", self)
+        relaunch_action.triggered.connect(self._relaunch_app)
+        menu.addAction(relaunch_action)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self._quit_app)
         menu.addAction(quit_action)
@@ -2108,6 +2131,32 @@ class NeuraTypeWindow(QMainWindow):
         self._indicator.hide_indicator()
         self._save_settings()
         self.backend.cleanup()
+        QApplication.quit()
+
+    def _relaunch_app(self):
+        """Save state, then spawn a detached launcher that restarts after 2 s."""
+        self._indicator.hide_indicator()
+        self._save_settings()
+        self.backend.cleanup()
+
+        if _PORTABLE:
+            exe = os.path.join(os.path.dirname(_BASE_DIR), "NeuraType.exe")
+            relaunch_cmd = f'timeout /t 2 /nobreak >nul && start "" "{exe}"'
+        else:
+            python = sys.executable
+            script = os.path.abspath(os.path.join(_BASE_DIR, "speech_to_text_app.py"))
+            relaunch_cmd = f'timeout /t 2 /nobreak >nul && "{python}" "{script}"'
+
+        # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP make the child fully
+        # independent — it survives after this process exits.
+        subprocess.Popen(
+            ["cmd.exe", "/c", relaunch_cmd],
+            creationflags=(
+                subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | 0x08000000  # CREATE_NO_WINDOW
+            ),
+        )
         QApplication.quit()
 
     # ------------------------------------------------------------------
@@ -2269,11 +2318,10 @@ class NeuraTypeWindow(QMainWindow):
             self.backend.current_cancel_hotkey = s["cancel_hotkey"]
             self.backend.register_cancel_hotkey()
 
-        # Re-register extra hotkeys
-        self.backend.unregister_repaste_hotkey()
+        # Re-register extra hotkeys (old ones already unregistered in _save_and_close)
         self.backend.register_repaste_hotkey()
-        self.backend.unregister_history_hotkey()
         self.backend.register_history_hotkey()
+        self.backend.register_refresh_hotkey()
 
     def _release_gpu(self):
         if self.backend.is_recording:
@@ -2521,7 +2569,9 @@ class NeuraTypeWindow(QMainWindow):
         cards_layout.setSpacing(10)
         scroll.setWidget(cards_container)
 
-        state = {"newest_first": True, "query": "", "selected": set()}
+        _PAGE = 50
+        state = {"newest_first": True, "query": "", "selected": set(),
+                 "_ordered": [], "_loaded": 0}
         t = THEMES.get(_current_theme, THEMES["dark"])
 
         def _highlight(text, query):
@@ -2577,6 +2627,36 @@ class NeuraTypeWindow(QMainWindow):
                 card.setStyleSheet(f"QFrame#card {{ border: 2px solid {t['ACCENT']}; }}")
             return card
 
+        def _append_batch():
+            # Remove trailing stretch before adding more cards
+            for i in range(cards_layout.count() - 1, -1, -1):
+                item = cards_layout.itemAt(i)
+                if item and item.spacerItem():
+                    cards_layout.takeAt(i)
+                    break
+            start = state["_loaded"]
+            end = start + _PAGE
+            q = state["query"].strip()
+            for ts, txt in state["_ordered"][start:end]:
+                cards_layout.addWidget(_make_card(ts, txt, q))
+            state["_loaded"] = end
+            remaining = len(state["_ordered"]) - state["_loaded"]
+            if remaining > 0:
+                lm = QPushButton(f"Load more  ({remaining} remaining)")
+                lm.setObjectName("secondary")
+                lm.setCursor(Qt.CursorShape.PointingHandCursor)
+                def _on_load_more(_lm=lm):
+                    for i in range(cards_layout.count()):
+                        item = cards_layout.itemAt(i)
+                        if item and item.widget() is _lm:
+                            cards_layout.takeAt(i)
+                            _lm.deleteLater()
+                            break
+                    _append_batch()
+                lm.clicked.connect(_on_load_more)
+                cards_layout.addWidget(lm)
+            cards_layout.addStretch()
+
         def _populate(el):
             while cards_layout.count():
                 item = cards_layout.takeAt(0)
@@ -2592,9 +2672,9 @@ class NeuraTypeWindow(QMainWindow):
                 cards_layout.addStretch()
                 return
             ordered = list(reversed(filtered)) if state["newest_first"] else list(filtered)
-            for ts, txt in ordered:
-                cards_layout.addWidget(_make_card(ts, txt, state["query"].strip()))
-            cards_layout.addStretch()
+            state["_ordered"] = ordered
+            state["_loaded"] = 0
+            _append_batch()
 
         def _on_search(txt):
             state["query"] = txt

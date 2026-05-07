@@ -242,6 +242,8 @@ DEFAULT_SETTINGS = {
     "auto_start": False,
     # CHG032
     "history_hotkey": "ctrl+shift+h",
+    # Refresh hotkeys shortcut
+    "refresh_hotkey": "ctrl+alt+z",
     # CHG7: local LLM
     "use_local_llm": False,
     "local_llm_model": DEFAULT_LOCAL_LLM_MODEL,
@@ -977,7 +979,8 @@ class TranscriberBackend:
                  on_silence_detected=None,
                  on_history_hotkey_triggered=None,
                  on_repaste_hotkey_triggered=None,
-                 on_transcription_stats=None):
+                 on_transcription_stats=None,
+                 on_refresh_hotkey_triggered=None):
         # Callbacks
         self.on_status = on_status
         self.on_model_loaded = on_model_loaded
@@ -992,6 +995,7 @@ class TranscriberBackend:
         self.on_history_hotkey_triggered = on_history_hotkey_triggered or (lambda: None)
         self.on_repaste_hotkey_triggered = on_repaste_hotkey_triggered or (lambda: None)
         self.on_transcription_stats = on_transcription_stats or (lambda *a: None)
+        self.on_refresh_hotkey_triggered = on_refresh_hotkey_triggered or (lambda: None)
 
         # Settings
         self.settings = load_settings()
@@ -1313,6 +1317,25 @@ class TranscriberBackend:
         except Exception:
             pass
 
+    def register_refresh_hotkey(self):
+        """Register hotkey that re-registers all hotkeys (useful after sleep/wake)."""
+        hk = self.settings.get("refresh_hotkey", "ctrl+alt+z")
+        if not hk:
+            return False
+        try:
+            keyboard.add_hotkey(hk, lambda: self.on_refresh_hotkey_triggered())
+            debug_logger.log(f"register_refresh_hotkey OK: {hk!r}")
+            return True
+        except Exception as e:
+            debug_logger.log(f"register_refresh_hotkey FAILED {hk!r}: {e}")
+            return False
+
+    def unregister_refresh_hotkey(self):
+        try:
+            keyboard.remove_hotkey(self.settings.get("refresh_hotkey", "ctrl+alt+z"))
+        except Exception:
+            pass
+
     def change_hotkey(self, new_hotkey):
         if new_hotkey.strip().lower() == self.current_cancel_hotkey.strip().lower():
             return False, "Start/Stop hotkey cannot be the same as Cancel hotkey."
@@ -1512,11 +1535,15 @@ class TranscriberBackend:
     def _build_whisper_kwargs(self):
         """Build the kwargs dict for whisper.transcribe()."""
         kwargs = {"fp16": (DEVICE == "cuda")}
-        # CHG5-fix: encourage proper punctuation via initial_prompt
+        # Encourage proper punctuation
         kwargs["initial_prompt"] = (
             "Hello, welcome. This is a properly punctuated transcript "
             "with correct capitalization, periods, commas, and question marks."
         )
+        # condition_on_previous_text=False prevents hallucination cascades in long
+        # recordings — each segment is decoded independently, stopping garbage text
+        # from feeding forward into subsequent segments.
+        kwargs["condition_on_previous_text"] = False
         # CHG007 / CHG021 / CHG8-fix: language
         lang = self.settings.get("language", "English")
         legacy_auto = self.settings.get("auto_detect_language", False)
@@ -2080,6 +2107,13 @@ class TranscriberBackend:
             debug_logger.log(f"_reregister_all_hotkeys: registered history hotkey OK")
         except Exception as e:
             debug_logger.log(f"_reregister_all_hotkeys: FAILED history hotkey: {e}")
+        try:
+            hk = self.settings.get("refresh_hotkey", "ctrl+alt+z")
+            if hk:
+                keyboard.add_hotkey(hk, lambda: self.on_refresh_hotkey_triggered())
+                debug_logger.log(f"_reregister_all_hotkeys: registered refresh hotkey OK")
+        except Exception as e:
+            debug_logger.log(f"_reregister_all_hotkeys: FAILED refresh hotkey: {e}")
         debug_logger.log("_reregister_all_hotkeys: done")
 
     # ------------------------------------------------------------------
@@ -2091,3 +2125,4 @@ class TranscriberBackend:
         self.unregister_cancel_hotkey()
         self.unregister_repaste_hotkey()
         self.unregister_history_hotkey()
+        self.unregister_refresh_hotkey()
