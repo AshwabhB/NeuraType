@@ -60,13 +60,13 @@ THEMES = {
         "BUTTON_HOVER":  "#3a3a3a",
     },
     "light": {
-        "BG":            "#fafafa",
+        "BG":            "#eeeef5",  # cool lavender tint — cards pop against this
         "BG_CARD":       "#ffffff",
-        "BG_INPUT":      "#f4f4f5",
-        "BORDER":        "#e4e4e7",
+        "BG_INPUT":      "#f5f5fa",
+        "BORDER":        "#c8c8d8",  # visible, brand-tinted border
         "TEXT_PRIMARY":  "#18181b",
-        "TEXT_SECONDARY":"#52525b",
-        "TEXT_DIM":      "#a1a1aa",
+        "TEXT_SECONDARY":"#3f3f46",  # darker — much more readable
+        "TEXT_DIM":      "#71717a",  # less washed-out
         "ACCENT":        "#7c3aed",
         "ACCENT_HOVER":  "#6d28d9",
         "ACCENT_LIGHT":  "#a78bfa",
@@ -74,8 +74,8 @@ THEMES = {
         "GREEN":         "#059669",
         "AMBER":         "#d97706",
         "RED":           "#dc2626",
-        "BUTTON_BG":     "#e4e4e7",
-        "BUTTON_HOVER":  "#d4d4d8",
+        "BUTTON_BG":     "#d4d4e8",  # clearly visible on white cards
+        "BUTTON_HOVER":  "#c4c4de",  # strong hover response
     },
 }
 
@@ -2122,9 +2122,6 @@ class NeuraTypeWindow(QMainWindow):
         refresh_hk_action.triggered.connect(self._refresh_hotkeys)
         menu.addAction(refresh_hk_action)
         menu.addSeparator()
-        relaunch_action = QAction("Relaunch", self)
-        relaunch_action.triggered.connect(self._relaunch_app)
-        menu.addAction(relaunch_action)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self._quit_app)
         menu.addAction(quit_action)
@@ -2176,80 +2173,6 @@ class NeuraTypeWindow(QMainWindow):
         self._indicator.hide_indicator()
         self._save_settings()
         self.backend.cleanup()
-        QApplication.quit()
-
-    def _relaunch_app(self):
-        """Save state, write a .bat launcher, spawn it detached, and exit."""
-        import tempfile
-        from datetime import datetime as _dt
-
-        log_path = os.path.join(_DATA_DIR, "relaunch.log")
-
-        def _log(msg):
-            try:
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(f"[{_dt.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}\n")
-            except Exception:
-                pass
-
-        _log("=" * 60)
-        _log(f"Relaunch requested. _PORTABLE={_PORTABLE}")
-        _log(f"sys.executable={sys.executable}")
-        _log(f"_BASE_DIR={_BASE_DIR}")
-        _log(f"_DATA_DIR={_DATA_DIR}")
-
-        self._indicator.hide_indicator()
-        self._save_settings()
-        self.backend.cleanup()
-
-        if _PORTABLE:
-            target_exe = os.path.join(os.path.dirname(_BASE_DIR), "NeuraType.exe")
-            start_line = f'start "" "{target_exe}"'
-            _log(f"target_exe={target_exe}, exists={os.path.exists(target_exe)}")
-        else:
-            python = sys.executable
-            script = os.path.abspath(os.path.join(_BASE_DIR, "speech_to_text_app.py"))
-            start_line = f'start "" "{python}" "{script}"'
-            _log(f"python={python}, exists={os.path.exists(python)}")
-            _log(f"script={script}, exists={os.path.exists(script)}")
-
-        bat_path = os.path.join(tempfile.gettempdir(), "neuratype_relaunch.bat")
-        bat_lines = [
-            "@echo off",
-            f'echo [%TIME%] launcher started >> "{log_path}"',
-            "ping 127.0.0.1 -n 3 >nul",
-            f'echo [%TIME%] launching app >> "{log_path}"',
-            start_line,
-            f'echo [%TIME%] start returned errorlevel=%ERRORLEVEL% >> "{log_path}"',
-            'del "%~f0"',
-        ]
-        try:
-            with open(bat_path, "w", encoding="utf-8") as f:
-                f.write("\r\n".join(bat_lines) + "\r\n")
-            _log(f"bat written: {bat_path}")
-        except Exception as e:
-            _log(f"bat write FAILED: {e}")
-            QMessageBox.critical(None, "Relaunch Failed", f"Could not write launcher:\n{e}")
-            return
-
-        try:
-            p = subprocess.Popen(
-                ["cmd.exe", "/c", bat_path],
-                creationflags=(
-                    subprocess.DETACHED_PROCESS
-                    | subprocess.CREATE_NEW_PROCESS_GROUP
-                    | 0x08000000  # CREATE_NO_WINDOW
-                ),
-                close_fds=True,
-            )
-            _log(f"Popen OK, child pid={p.pid}")
-        except Exception as e:
-            _log(f"Popen FAILED: {e}")
-            QMessageBox.critical(None, "Relaunch Failed",
-                f"Could not spawn launcher:\n{e}\n\nbat: {bat_path}")
-            return
-
-        _log("calling QApplication.quit()")
         QApplication.quit()
 
     # ------------------------------------------------------------------
