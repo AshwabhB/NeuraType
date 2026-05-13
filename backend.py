@@ -1012,6 +1012,8 @@ class TranscriberBackend:
         self._last_audio = None           # CHG009: stored for retry
         self._command_context = None       # CHG012: selected text for command mode
         self._last_transcription = ""      # CHG020: re-paste
+        self._playback_start_time = None   # seek bar: wall time when playback began
+        self._playback_start_frame = 0     # seek bar: frame offset playback started at
 
         # Hotkey state
         self.current_hotkey = self.settings["hotkey"]
@@ -1032,6 +1034,17 @@ class TranscriberBackend:
         os.makedirs(self.model_dir, exist_ok=True)
         self._history_dir = os.path.join(_DATA_DIR, "history")
         os.makedirs(self._history_dir, exist_ok=True)
+        self._audio_cache_dir = os.path.join(_DATA_DIR, "audio_cache")
+        os.makedirs(self._audio_cache_dir, exist_ok=True)
+        self._last_audio_path = os.path.join(self._audio_cache_dir, "last_recording.wav")
+        # Restore _last_audio from disk so retry/playback survives a crash or restart
+        if os.path.exists(self._last_audio_path):
+            try:
+                data, sr = sf.read(self._last_audio_path)
+                if sr == self.sample_rate and data.size > 0:
+                    self._last_audio = data.reshape(-1, 1) if data.ndim == 1 else data
+            except Exception:
+                pass
 
         # Sub-systems
         self.dictionary = DictionaryManager()
@@ -1516,6 +1529,11 @@ class TranscriberBackend:
             return False
 
         self._last_audio = audio_array.copy()  # CHG009: store for retry
+        # Persist to disk so retry/playback survives crashes and restarts
+        try:
+            sf.write(self._last_audio_path, audio_array, self.sample_rate)
+        except Exception as e:
+            debug_logger.log(f"Failed to save last audio: {e}")
         threading.Thread(target=self._transcribe, args=(audio_array,), daemon=True).start()
         return True
 
@@ -1525,6 +1543,41 @@ class TranscriberBackend:
             threading.Thread(target=self._transcribe, args=(self._last_audio,), daemon=True).start()
             return True
         return False
+
+    def has_last_audio(self):
+        """Whether audio is available for playback or retry."""
+        return self._last_audio is not None and len(self._last_audio) > 0
+
+    def play_last_audio(self, start_frame=0):
+        """Play the last recorded audio asynchronously. Returns True if playback started."""
+        if not self.has_last_audio():
+            return False
+        start_frame = max(0, min(start_frame, len(self._last_audio) - 1))
+        self._playback_start_time = time.time()
+        self._playback_start_frame = start_frame
+        audio = self._last_audio[start_frame:] if start_frame > 0 else self._last_audio
+        def _play():
+            try:
+                sd.stop()
+                sd.play(audio, samplerate=self.sample_rate, blocking=False)
+            except Exception as e:
+                debug_logger.log(f"Playback failed: {e}")
+        threading.Thread(target=_play, daemon=True).start()
+        return True
+
+    def get_playback_frame(self):
+        """Estimate current playback frame from elapsed wall time."""
+        if self._playback_start_time is None:
+            return 0
+        elapsed = int((time.time() - self._playback_start_time) * self.sample_rate)
+        return self._playback_start_frame + elapsed
+
+    def stop_playback(self):
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        self._playback_start_time = None
 
     # ------------------------------------------------------------------
     # Transcription

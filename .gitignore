@@ -5,6 +5,7 @@ venv/
 models/*.pt
 
 # Personal / runtime state
+audio_cache/
 settings.json
 settings.local.json
 history/

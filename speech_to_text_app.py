@@ -83,6 +83,11 @@ def _t(key, theme_name="dark"):
     return THEMES.get(theme_name, THEMES["dark"]).get(key, "#ff00ff")
 
 
+def _fmt_time(seconds):
+    s = int(seconds)
+    return f"{s // 60}:{s % 60:02d}"
+
+
 def global_stylesheet(theme="dark"):
     t = THEMES.get(theme, THEMES["dark"])
     return f"""
@@ -1800,6 +1805,10 @@ class NeuraTypeWindow(QMainWindow):
         self._refresh_mic_list()
         self._apply_saved_mic()
 
+        # Show Play button and seek bar on startup if a previous recording is on disk
+        if self.backend.has_last_audio():
+            self._show_play_controls(True)
+
         # Register hotkeys — clean slate to avoid stale hooks
         keyboard.unhook_all()
         self.backend._reregister_all_hotkeys()
@@ -2028,6 +2037,15 @@ class NeuraTypeWindow(QMainWindow):
         self._retry_btn.clicked.connect(self._retry_transcription)
         header.addWidget(self._retry_btn)
 
+        # Play / Stop last audio
+        self._play_btn = QPushButton("▶ Play")
+        self._play_btn.setObjectName("secondary")
+        self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._play_btn.setVisible(False)
+        self._play_btn.clicked.connect(self._toggle_play_last_audio)
+        self._play_state = "idle"  # idle | playing
+        header.addWidget(self._play_btn)
+
         history_btn = QPushButton("History")
         history_btn.setObjectName("secondary")
         history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2035,6 +2053,33 @@ class NeuraTypeWindow(QMainWindow):
         header.addWidget(history_btn)
 
         lay.addLayout(header)
+
+        # Seek bar row — shown when audio is available
+        seek_row = QWidget()
+        seek_layout = QHBoxLayout(seek_row)
+        seek_layout.setContentsMargins(0, 2, 0, 2)
+        seek_layout.setSpacing(8)
+        self._seek_time_label = QLabel("0:00 / 0:00")
+        self._seek_time_label.setFont(QFont("Segoe UI", 10))
+        self._seek_time_label.setStyleSheet(f"color: {_t('TEXT_DIM')};")
+        self._seek_time_label.setFixedWidth(88)
+        self._seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self._seek_slider.setRange(0, 1000)
+        self._seek_slider.setValue(0)
+        self._seek_slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._seek_slider.sliderPressed.connect(self._seek_pressed)
+        self._seek_slider.sliderReleased.connect(self._seek_released)
+        seek_layout.addWidget(self._seek_time_label)
+        seek_layout.addWidget(self._seek_slider)
+        self._seek_row = seek_row
+        self._seek_row.setVisible(False)
+        lay.addWidget(self._seek_row)
+
+        # Timer to update seek bar position during playback
+        self._play_timer = QTimer()
+        self._play_timer.setInterval(100)
+        self._play_timer.timeout.connect(self._update_seek_bar)
+        self._user_seeking = False
 
         self._text_edit = QTextEdit()
         self._text_edit.setPlaceholderText("Your transcriptions will appear here...")
@@ -2134,29 +2179,77 @@ class NeuraTypeWindow(QMainWindow):
         QApplication.quit()
 
     def _relaunch_app(self):
-        """Save state, then spawn a detached launcher that restarts after 2 s."""
+        """Save state, write a .bat launcher, spawn it detached, and exit."""
+        import tempfile
+        from datetime import datetime as _dt
+
+        log_path = os.path.join(_DATA_DIR, "relaunch.log")
+
+        def _log(msg):
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{_dt.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}\n")
+            except Exception:
+                pass
+
+        _log("=" * 60)
+        _log(f"Relaunch requested. _PORTABLE={_PORTABLE}")
+        _log(f"sys.executable={sys.executable}")
+        _log(f"_BASE_DIR={_BASE_DIR}")
+        _log(f"_DATA_DIR={_DATA_DIR}")
+
         self._indicator.hide_indicator()
         self._save_settings()
         self.backend.cleanup()
 
         if _PORTABLE:
-            exe = os.path.join(os.path.dirname(_BASE_DIR), "NeuraType.exe")
-            relaunch_cmd = f'timeout /t 2 /nobreak >nul && start "" "{exe}"'
+            target_exe = os.path.join(os.path.dirname(_BASE_DIR), "NeuraType.exe")
+            start_line = f'start "" "{target_exe}"'
+            _log(f"target_exe={target_exe}, exists={os.path.exists(target_exe)}")
         else:
             python = sys.executable
             script = os.path.abspath(os.path.join(_BASE_DIR, "speech_to_text_app.py"))
-            relaunch_cmd = f'timeout /t 2 /nobreak >nul && "{python}" "{script}"'
+            start_line = f'start "" "{python}" "{script}"'
+            _log(f"python={python}, exists={os.path.exists(python)}")
+            _log(f"script={script}, exists={os.path.exists(script)}")
 
-        # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP make the child fully
-        # independent — it survives after this process exits.
-        subprocess.Popen(
-            ["cmd.exe", "/c", relaunch_cmd],
-            creationflags=(
-                subprocess.DETACHED_PROCESS
-                | subprocess.CREATE_NEW_PROCESS_GROUP
-                | 0x08000000  # CREATE_NO_WINDOW
-            ),
-        )
+        bat_path = os.path.join(tempfile.gettempdir(), "neuratype_relaunch.bat")
+        bat_lines = [
+            "@echo off",
+            f'echo [%TIME%] launcher started >> "{log_path}"',
+            "ping 127.0.0.1 -n 3 >nul",
+            f'echo [%TIME%] launching app >> "{log_path}"',
+            start_line,
+            f'echo [%TIME%] start returned errorlevel=%ERRORLEVEL% >> "{log_path}"',
+            'del "%~f0"',
+        ]
+        try:
+            with open(bat_path, "w", encoding="utf-8") as f:
+                f.write("\r\n".join(bat_lines) + "\r\n")
+            _log(f"bat written: {bat_path}")
+        except Exception as e:
+            _log(f"bat write FAILED: {e}")
+            QMessageBox.critical(None, "Relaunch Failed", f"Could not write launcher:\n{e}")
+            return
+
+        try:
+            p = subprocess.Popen(
+                ["cmd.exe", "/c", bat_path],
+                creationflags=(
+                    subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                    | 0x08000000  # CREATE_NO_WINDOW
+                ),
+                close_fds=True,
+            )
+            _log(f"Popen OK, child pid={p.pid}")
+        except Exception as e:
+            _log(f"Popen FAILED: {e}")
+            QMessageBox.critical(None, "Relaunch Failed",
+                f"Could not spawn launcher:\n{e}\n\nbat: {bat_path}")
+            return
+
+        _log("calling QApplication.quit()")
         QApplication.quit()
 
     # ------------------------------------------------------------------
@@ -2190,6 +2283,9 @@ class NeuraTypeWindow(QMainWindow):
         self._file_btn.setEnabled(True)
         self._record_btn.setEnabled(True)
         self._retry_btn.setVisible(False)
+        # Audio was saved — show Play button and seek bar so user can replay it
+        if self.backend.has_last_audio():
+            self._show_play_controls(True)
         if not text:
             self._status_label.setText("No speech detected")
             self._status_label.setStyleSheet(f"color: {_t('AMBER')}; font-size: 12px;")
@@ -2208,6 +2304,9 @@ class NeuraTypeWindow(QMainWindow):
         self._file_btn.setEnabled(True)
         self._record_btn.setEnabled(True)
         self._retry_btn.setVisible(True)  # CHG009
+        # Even on error, the audio was saved — let the user retry or replay it
+        if self.backend.has_last_audio():
+            self._show_play_controls(True)
         QMessageBox.critical(self, "Transcription Error", f"Failed to transcribe:\n{error}")
         self._status_label.setText("Transcription failed")
         self._status_label.setStyleSheet(f"color: {_t('RED')}; font-size: 12px;")
@@ -2240,6 +2339,76 @@ class NeuraTypeWindow(QMainWindow):
         """Retry last transcription (CHG009)."""
         if self.backend.retry_transcription():
             self._retry_btn.setVisible(False)
+
+    def _show_play_controls(self, visible):
+        """Show or hide the play button and seek row together."""
+        self._play_btn.setVisible(visible)
+        self._seek_row.setVisible(visible)
+        if visible and self.backend.has_last_audio():
+            total_sec = len(self.backend._last_audio) / self.backend.sample_rate
+            self._seek_time_label.setText(f"0:00 / {_fmt_time(total_sec)}")
+
+    def _toggle_play_last_audio(self):
+        """Play or stop the last recorded audio."""
+        if self._play_state == "playing":
+            self.backend.stop_playback()
+            self._play_state = "idle"
+            self._play_btn.setText("▶ Play")
+            self._play_timer.stop()
+            self._seek_slider.setValue(0)
+            if self.backend.has_last_audio():
+                total_sec = len(self.backend._last_audio) / self.backend.sample_rate
+                self._seek_time_label.setText(f"0:00 / {_fmt_time(total_sec)}")
+            return
+        if not self.backend.has_last_audio():
+            return
+        if self.backend.play_last_audio():
+            self._play_state = "playing"
+            self._play_btn.setText("■ Stop")
+            self._play_timer.start()
+            try:
+                duration_ms = int(
+                    1000 * len(self.backend._last_audio) / self.backend.sample_rate
+                ) + 200
+            except Exception:
+                duration_ms = 60000
+            QTimer.singleShot(duration_ms, self._reset_play_btn)
+
+    def _reset_play_btn(self):
+        if self._play_state == "playing":
+            self._play_state = "idle"
+            self._play_btn.setText("▶ Play")
+            self._play_timer.stop()
+            self._seek_slider.setValue(0)
+            if self.backend.has_last_audio():
+                total_sec = len(self.backend._last_audio) / self.backend.sample_rate
+                self._seek_time_label.setText(f"0:00 / {_fmt_time(total_sec)}")
+
+    def _seek_pressed(self):
+        self._user_seeking = True
+
+    def _seek_released(self):
+        self._user_seeking = False
+        if self._play_state != "playing" or not self.backend.has_last_audio():
+            return
+        total_frames = len(self.backend._last_audio)
+        new_frame = int(self._seek_slider.value() / 1000 * total_frames)
+        self.backend.play_last_audio(start_frame=new_frame)
+        remaining_ms = int(1000 * (total_frames - new_frame) / self.backend.sample_rate) + 200
+        QTimer.singleShot(remaining_ms, self._reset_play_btn)
+
+    def _update_seek_bar(self):
+        if self._user_seeking or self._play_state != "playing":
+            return
+        if not self.backend.has_last_audio():
+            return
+        total_frames = len(self.backend._last_audio)
+        current_frame = min(self.backend.get_playback_frame(), total_frames)
+        if total_frames > 0:
+            self._seek_slider.setValue(int(current_frame / total_frames * 1000))
+            current_sec = current_frame / self.backend.sample_rate
+            total_sec = total_frames / self.backend.sample_rate
+            self._seek_time_label.setText(f"{_fmt_time(current_sec)} / {_fmt_time(total_sec)}")
 
     # ------------------------------------------------------------------
     # Mic
