@@ -74,6 +74,7 @@ WHISPER_MODELS = {
 DEFAULT_MODEL = "turbo"
 DEFAULT_HOTKEY = "ctrl+win"
 DEFAULT_CANCEL_HOTKEY = "ctrl+shift+space"
+DEFAULT_PAUSE_HOTKEY = "ctrl+shift+p"
 
 # ---------------------------------------------------------------------------
 # Local LLM model catalogue — smallest first
@@ -188,6 +189,7 @@ FIRST_BOOT_FILE = os.path.join(_DATA_DIR, "models", "firstBootSettings.json")
 DEFAULT_SETTINGS = {
     "hotkey": DEFAULT_HOTKEY,
     "cancel_hotkey": DEFAULT_CANCEL_HOTKEY,
+    "pause_hotkey": DEFAULT_PAUSE_HOTKEY,
     "hotkey_enabled": True,
     "auto_paste": True,
     "recording_indicator": True,
@@ -252,6 +254,11 @@ DEFAULT_SETTINGS = {
     "selected_llm_models": [],
     # Debug
     "debug_logging": False,
+    # Speaker diarization via WhisperX
+    "speaker_diarization": False,
+    "hf_token": "",
+    "num_speakers": 0,  # 0 = auto-detect
+    "speaker_align": False,  # word-level alignment (slower but more precise)
 }
 
 # ---------------------------------------------------------------------------
@@ -980,7 +987,8 @@ class TranscriberBackend:
                  on_history_hotkey_triggered=None,
                  on_repaste_hotkey_triggered=None,
                  on_transcription_stats=None,
-                 on_refresh_hotkey_triggered=None):
+                 on_refresh_hotkey_triggered=None,
+                 on_pause_hotkey_triggered=None):
         # Callbacks
         self.on_status = on_status
         self.on_model_loaded = on_model_loaded
@@ -996,12 +1004,14 @@ class TranscriberBackend:
         self.on_repaste_hotkey_triggered = on_repaste_hotkey_triggered or (lambda: None)
         self.on_transcription_stats = on_transcription_stats or (lambda *a: None)
         self.on_refresh_hotkey_triggered = on_refresh_hotkey_triggered or (lambda: None)
+        self.on_pause_hotkey_triggered = on_pause_hotkey_triggered or (lambda: None)
 
         # Settings
         self.settings = load_settings()
 
         # Recording state
         self.is_recording = False
+        self.is_paused = False
         self.audio_data = []
         self.sample_rate = 16000
         self.selected_device_index = None
@@ -1018,6 +1028,7 @@ class TranscriberBackend:
         # Hotkey state
         self.current_hotkey = self.settings["hotkey"]
         self.current_cancel_hotkey = self.settings["cancel_hotkey"]
+        self.current_pause_hotkey = self.settings.get("pause_hotkey", DEFAULT_PAUSE_HOTKEY)
         self.hotkey_enabled = self.settings["hotkey_enabled"]
         self.auto_paste = self.settings["auto_paste"]
 
@@ -1288,6 +1299,13 @@ class TranscriberBackend:
         except Exception as e:
             return False, f"Cancel hotkey error: {e}", "#ef4444"
 
+    def register_pause_hotkey(self):
+        try:
+            keyboard.add_hotkey(self.current_pause_hotkey, self._pause_hotkey_triggered_internal)
+            return True, f"Pause hotkey active: {self.current_pause_hotkey}", "#10b981"
+        except Exception as e:
+            return False, f"Pause hotkey error: {e}", "#ef4444"
+
     def register_repaste_hotkey(self):
         """Register re-paste last transcript hotkey (CHG020)."""
         hk = self.settings.get("repaste_hotkey", "alt+shift+z")
@@ -1315,6 +1333,12 @@ class TranscriberBackend:
     def unregister_cancel_hotkey(self):
         try:
             keyboard.remove_hotkey(self.current_cancel_hotkey)
+        except Exception:
+            pass
+
+    def unregister_pause_hotkey(self):
+        try:
+            keyboard.remove_hotkey(self.current_pause_hotkey)
         except Exception:
             pass
 
@@ -1379,6 +1403,24 @@ class TranscriberBackend:
                 pass
             return False, str(e)
 
+    def change_pause_hotkey(self, new_hotkey):
+        nh = new_hotkey.strip().lower()
+        if nh == self.current_hotkey.strip().lower():
+            return False, "Pause hotkey cannot be the same as Start/Stop hotkey."
+        if nh == self.current_cancel_hotkey.strip().lower():
+            return False, "Pause hotkey cannot be the same as Cancel hotkey."
+        self.unregister_pause_hotkey()
+        try:
+            keyboard.add_hotkey(new_hotkey, self._pause_hotkey_triggered_internal)
+            self.current_pause_hotkey = new_hotkey
+            return True, None
+        except Exception as e:
+            try:
+                keyboard.add_hotkey(self.current_pause_hotkey, self._pause_hotkey_triggered_internal)
+            except Exception:
+                pass
+            return False, str(e)
+
     def _hotkey_triggered_internal(self):
         debug_logger.log(f"_hotkey_triggered_internal: enabled={self.hotkey_enabled}, "
                          f"model_loading={self.model_loading}, recording={self.is_recording}")
@@ -1415,6 +1457,11 @@ class TranscriberBackend:
             return
         self.on_cancel_hotkey_triggered()
 
+    def _pause_hotkey_triggered_internal(self):
+        if not self.hotkey_enabled or not self.is_recording:
+            return
+        self.on_pause_hotkey_triggered()
+
     def _repaste_triggered(self):
         """Re-paste the last transcription (CHG020)."""
         if self._last_transcription:
@@ -1434,6 +1481,7 @@ class TranscriberBackend:
     # ------------------------------------------------------------------
     def start_recording(self):
         self.is_recording = True
+        self.is_paused = False
         self.audio_data = []
         self._silence_start = None
         self._speech_detected = False
@@ -1471,6 +1519,9 @@ class TranscriberBackend:
         def audio_callback(indata, frames, time_info, status):
             if status:
                 print(f"Audio status: {status}")
+            if self.is_paused:
+                self.audio_level = 0.0
+                return
             data = indata.copy()
             if gain != 1.0:
                 data = data * gain
@@ -1495,8 +1546,33 @@ class TranscriberBackend:
         )
         self.stream.start()
 
+    def pause_recording(self):
+        """Pause capturing audio while keeping the stream and buffered audio alive."""
+        if self.is_recording and not self.is_paused:
+            self.is_paused = True
+            self.audio_level = 0.0
+            return True
+        return False
+
+    def resume_recording(self):
+        """Resume capturing audio after a pause."""
+        if self.is_recording and self.is_paused:
+            self.is_paused = False
+            self._silence_start = None
+            return True
+        return False
+
+    def toggle_pause(self):
+        """Toggle the paused state. Returns the new is_paused value."""
+        if self.is_paused:
+            self.resume_recording()
+        else:
+            self.pause_recording()
+        return self.is_paused
+
     def cancel_recording(self):
         self.is_recording = False
+        self.is_paused = False
         self.audio_level = 0.0
         try:
             self.stream.stop()
@@ -1509,6 +1585,7 @@ class TranscriberBackend:
         """Stop recording and start transcription. Returns False if no usable audio."""
         debug_logger.log("stop_recording called")
         self.is_recording = False
+        self.is_paused = False
         self.audio_level = 0.0
 
         # CHG015: stop sound
@@ -1784,6 +1861,10 @@ class TranscriberBackend:
     # ------------------------------------------------------------------
     def transcribe_file(self, file_path):
         """Transcribe an audio/video file. Called from a background thread."""
+        if self.settings.get("speaker_diarization", False):
+            self._transcribe_file_diarized(file_path)
+            return
+
         fname = os.path.basename(file_path)
         self.on_status(f"Transcribing {fname}...", "#f59e0b")
         self._last_activity = time.time()
@@ -1794,12 +1875,11 @@ class TranscriberBackend:
             return
 
         try:
-            # Get duration for adaptive model selection
             try:
                 info = sf.info(file_path)
                 duration_secs = info.duration
             except Exception:
-                duration_secs = 999  # unknown duration — use main model
+                duration_secs = 999
 
             model = self._pick_model(duration_secs)
             kwargs = self._build_whisper_kwargs()
@@ -1816,6 +1896,122 @@ class TranscriberBackend:
         except Exception as e:
             debug_logger.log(f"transcribe_file EXCEPTION: {e}")
             self.on_transcription_error(str(e))
+
+    def _transcribe_file_diarized(self, file_path):
+        """Transcribe file with WhisperX speaker diarization."""
+        fname = os.path.basename(file_path)
+        debug_logger.log(f"_transcribe_file_diarized START: {file_path}")
+
+        try:
+            import whisperx
+        except ImportError:
+            self.on_status("whisperx not installed — run: pip install whisperx", "#ef4444")
+            self.on_transcription_error(
+                "whisperx is not installed.\n\nInstall it with:\n  pip install whisperx"
+            )
+            return
+
+        hf_token = self.settings.get("hf_token", "").strip()
+        if not hf_token:
+            self.on_transcription_error(
+                "Hugging Face token is required for speaker detection.\n"
+                "Add it in Settings → Speaker tab."
+            )
+            return
+
+        num_speakers_setting = self.settings.get("num_speakers", 0)
+        num_speakers = None if num_speakers_setting == 0 else num_speakers_setting
+        compute_type = "float16" if DEVICE == "cuda" else "int8"
+
+        try:
+            self.on_status(f"Loading WhisperX model for {fname}...", "#f59e0b")
+            wx_model = whisperx.load_model(
+                self.current_model_name, DEVICE,
+                compute_type=compute_type,
+                download_root=self.model_dir,
+            )
+
+            self.on_status("Transcribing audio...", "#f59e0b")
+            audio = whisperx.load_audio(file_path)
+            result = wx_model.transcribe(audio, batch_size=16 if DEVICE == "cuda" else 4)
+            detected_lang = result.get("language", "en")
+
+            if self.settings.get("speaker_align", False):
+                self.on_status("Aligning transcript (word-level)...", "#f59e0b")
+                model_a, metadata = whisperx.load_align_model(
+                    language_code=detected_lang, device=DEVICE
+                )
+                result = whisperx.align(
+                    result["segments"], model_a, metadata, audio, DEVICE,
+                    return_char_alignments=False,
+                )
+
+            _hf_cache = os.path.join(
+                os.path.expanduser("~"), ".cache", "huggingface", "hub",
+                "models--pyannote--speaker-diarization-3.1"
+            )
+            _cached = os.path.isdir(_hf_cache)
+            _status_msg = "Detecting speakers..." if _cached else "Detecting speakers (downloading ~65 MB on first run)..."
+            self.on_status(_status_msg, "#f59e0b")
+            try:
+                _DiarizationPipeline = whisperx.DiarizationPipeline
+            except AttributeError:
+                from whisperx.diarize import DiarizationPipeline as _DiarizationPipeline
+            diarize_model = _DiarizationPipeline(
+                model_name="pyannote/speaker-diarization-3.1",
+                token=hf_token, device=DEVICE
+            )
+            diarize_segments = diarize_model(audio, num_speakers=num_speakers)
+            result = whisperx.assign_word_speakers(diarize_segments, result)
+
+            transcription = self._format_diarized_output(result["segments"])
+            if not transcription.strip():
+                transcription = "[No speech detected]"
+
+            self._last_transcription = transcription
+            self._save_to_history(transcription)
+            wc = len(transcription.split())
+            self.stats.record(0, wc)
+            self.on_transcription_stats(0, wc, self.stats.get_all_time()["words"])
+            self.on_transcription_complete(transcription)
+            debug_logger.log("_transcribe_file_diarized END")
+
+        except Exception as e:
+            debug_logger.log(f"_transcribe_file_diarized EXCEPTION: {e}")
+            self.on_transcription_error(str(e))
+
+    def _format_diarized_output(self, segments):
+        """Format diarized segments as a labelled conversation."""
+        # Build a stable speaker → label mapping in order of first appearance
+        speaker_map = {}
+        for seg in segments:
+            sp = seg.get("speaker")
+            if sp and sp not in speaker_map:
+                speaker_map[sp] = f"Speaker {len(speaker_map) + 1}"
+
+        lines = []
+        current_label = None
+        current_parts = []
+
+        for seg in segments:
+            sp = seg.get("speaker")
+            label = speaker_map.get(sp, "Unknown") if sp else "Unknown"
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
+            if label != current_label:
+                if current_label is not None and current_parts:
+                    lines.append(f"{current_label}: {' '.join(current_parts)}")
+                    lines.append("")
+                current_label = label
+                current_parts = [text]
+            else:
+                current_parts.append(text)
+
+        if current_label and current_parts:
+            lines.append(f"{current_label}: {' '.join(current_parts)}")
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Text processing pipeline
@@ -2149,6 +2345,11 @@ class TranscriberBackend:
         except Exception as e:
             debug_logger.log(f"_reregister_all_hotkeys: FAILED cancel hotkey: {e}")
         try:
+            keyboard.add_hotkey(self.current_pause_hotkey, self._pause_hotkey_triggered_internal)
+            debug_logger.log(f"_reregister_all_hotkeys: registered pause hotkey OK")
+        except Exception as e:
+            debug_logger.log(f"_reregister_all_hotkeys: FAILED pause hotkey: {e}")
+        try:
             hk = self.settings.get("repaste_hotkey", "alt+shift+z")
             keyboard.add_hotkey(hk, self._repaste_triggered)
             debug_logger.log(f"_reregister_all_hotkeys: registered repaste hotkey OK")
@@ -2176,6 +2377,7 @@ class TranscriberBackend:
         self._hotkey_watchdog_running = False
         self.unregister_hotkey()
         self.unregister_cancel_hotkey()
+        self.unregister_pause_hotkey()
         self.unregister_repaste_hotkey()
         self.unregister_history_hotkey()
         self.unregister_refresh_hotkey()

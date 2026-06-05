@@ -10,7 +10,7 @@ import keyboard
 # IMPORTANT: Import backend BEFORE PyQt6 to avoid DLL conflicts.
 from backend import (
     TranscriberBackend, WHISPER_MODELS, DEFAULT_MODEL, DEFAULT_HOTKEY,
-    DEFAULT_CANCEL_HOTKEY, DEVICE, GPU_INFO, SUPPORTED_LANGUAGES,
+    DEFAULT_CANCEL_HOTKEY, DEFAULT_PAUSE_HOTKEY, DEVICE, GPU_INFO, SUPPORTED_LANGUAGES,
     HAS_OPENAI, load_settings, save_settings, _BASE_DIR, _DATA_DIR,
     LOCAL_LLM_MODELS, DEFAULT_LOCAL_LLM_MODEL,
     is_first_boot, mark_first_boot_done,
@@ -380,6 +380,7 @@ class BackendSignals(QObject):
     hotkey_triggered = pyqtSignal()
     hold_release = pyqtSignal()          # CHG6-fix: dedicated stop for hold mode
     cancel_hotkey_triggered = pyqtSignal()
+    pause_hotkey_triggered = pyqtSignal()
     predownload_progress = pyqtSignal(str, int, int)
     silence_detected = pyqtSignal()
     history_hotkey_triggered = pyqtSignal()
@@ -787,17 +788,21 @@ class SettingsWindow(QDialog):
         self._cancel_hk_input = QLineEdit()
         gl.addWidget(self._cancel_hk_input, 1, 1)
 
-        gl.addWidget(QLabel("Re-paste:"), 2, 0)
+        gl.addWidget(QLabel("Pause / Resume:"), 2, 0)
+        self._pause_hk_input = QLineEdit()
+        gl.addWidget(self._pause_hk_input, 2, 1)
+
+        gl.addWidget(QLabel("Re-paste:"), 3, 0)
         self._repaste_hk_input = QLineEdit()
-        gl.addWidget(self._repaste_hk_input, 2, 1)
+        gl.addWidget(self._repaste_hk_input, 3, 1)
 
-        gl.addWidget(QLabel("History:"), 3, 0)
+        gl.addWidget(QLabel("History:"), 4, 0)
         self._history_hk_input = QLineEdit()
-        gl.addWidget(self._history_hk_input, 3, 1)
+        gl.addWidget(self._history_hk_input, 4, 1)
 
-        gl.addWidget(QLabel("Refresh Hotkeys:"), 4, 0)
+        gl.addWidget(QLabel("Refresh Hotkeys:"), 5, 0)
         self._refresh_hk_input = QLineEdit()
-        gl.addWidget(self._refresh_hk_input, 4, 1)
+        gl.addWidget(self._refresh_hk_input, 5, 1)
 
         lay.addWidget(g)
 
@@ -1012,6 +1017,32 @@ class SettingsWindow(QDialog):
         gl2.addStretch()
         lay.addWidget(g2)
 
+        g3 = QGroupBox("Speaker Detection")
+        gl3 = QVBoxLayout(g3)
+        hf_note = QLabel(
+            "Hugging Face token for pyannote/speaker-diarization-3.1.\n"
+            "Accept the model license at huggingface.co/pyannote/speaker-diarization-3.1, "
+            "then generate a Read token at huggingface.co/settings/tokens."
+        )
+        hf_note.setWordWrap(True)
+        hf_note.setStyleSheet(f"color: {_t('TEXT_DIM')}; font-size: 11px;")
+        gl3.addWidget(hf_note)
+        self._hf_token_input = QLineEdit()
+        self._hf_token_input.setPlaceholderText("hf_xxxxxxxxxxxxxxxxxxxx")
+        self._hf_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        gl3.addWidget(self._hf_token_input)
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Number of speakers:"))
+        self._num_speakers_combo = StyledComboBox()
+        self._num_speakers_combo.addItems(["Auto-detect", "2", "3", "4"])
+        row3.addWidget(self._num_speakers_combo)
+        row3.addStretch()
+        gl3.addLayout(row3)
+        self._speaker_align_cb = QCheckBox("Word-level alignment (slower, more precise speaker boundaries)")
+        self._speaker_align_cb.setCursor(Qt.CursorShape.PointingHandCursor)
+        gl3.addWidget(self._speaker_align_cb)
+        lay.addWidget(g3)
+
         lay.addStretch()
         return w
 
@@ -1156,6 +1187,7 @@ class SettingsWindow(QDialog):
         self._debug_cb.setChecked(s.get("debug_logging", False))
         self._hk_input.setText(s.get("hotkey", DEFAULT_HOTKEY))
         self._cancel_hk_input.setText(s.get("cancel_hotkey", DEFAULT_CANCEL_HOTKEY))
+        self._pause_hk_input.setText(s.get("pause_hotkey", DEFAULT_PAUSE_HOTKEY))
         self._repaste_hk_input.setText(s.get("repaste_hotkey", "alt+shift+z"))
         self._history_hk_input.setText(s.get("history_hotkey", "ctrl+shift+h"))
         self._refresh_hk_input.setText(s.get("refresh_hotkey", "ctrl+alt+z"))
@@ -1195,6 +1227,11 @@ class SettingsWindow(QDialog):
         self._gpu_idle_spin.setValue(s.get("gpu_idle_release_minutes", 0))
         self._adaptive_cb.setChecked(s.get("adaptive_model", False))
         self._paste_delay_spin.setValue(s.get("paste_delay_ms", 100))
+        # Speaker detection
+        self._hf_token_input.setText(s.get("hf_token", ""))
+        ns = s.get("num_speakers", 0)
+        self._num_speakers_combo.setCurrentIndex(0 if ns == 0 else ns - 1)
+        self._speaker_align_cb.setChecked(s.get("speaker_align", False))
         # Dictionary
         self._dict_list.clear()
         for w in self.backend.dictionary.get_allowed_words():
@@ -1412,6 +1449,7 @@ class SettingsWindow(QDialog):
         debug_logger.set_enabled(s["debug_logging"])
         s["hotkey"] = self._hk_input.text().strip() or DEFAULT_HOTKEY
         s["cancel_hotkey"] = self._cancel_hk_input.text().strip() or DEFAULT_CANCEL_HOTKEY
+        s["pause_hotkey"] = self._pause_hk_input.text().strip() or DEFAULT_PAUSE_HOTKEY
         s["repaste_hotkey"] = self._repaste_hk_input.text().strip() or "alt+shift+z"
         s["history_hotkey"] = self._history_hk_input.text().strip() or "ctrl+shift+h"
         s["refresh_hotkey"] = self._refresh_hk_input.text().strip() or "ctrl+alt+z"
@@ -1440,6 +1478,11 @@ class SettingsWindow(QDialog):
         s["gpu_idle_release_minutes"] = self._gpu_idle_spin.value()
         s["adaptive_model"] = self._adaptive_cb.isChecked()
         s["paste_delay_ms"] = self._paste_delay_spin.value()
+        # Speaker detection
+        s["hf_token"] = self._hf_token_input.text().strip()
+        idx = self._num_speakers_combo.currentIndex()
+        s["num_speakers"] = 0 if idx == 0 else idx + 1
+        s["speaker_align"] = self._speaker_align_cb.isChecked()
 
         # Apply auto-start
         TranscriberBackend.set_auto_start(s["auto_start"])
@@ -1761,6 +1804,7 @@ class NeuraTypeWindow(QMainWindow):
         self._signals.hotkey_triggered.connect(self._toggle_recording)
         self._signals.hold_release.connect(self._on_hold_release)
         self._signals.cancel_hotkey_triggered.connect(self._cancel_recording)
+        self._signals.pause_hotkey_triggered.connect(self._toggle_pause)
         self._signals.predownload_progress.connect(self._on_predownload_progress)
         self._signals.silence_detected.connect(self._on_silence_detected)
         self._signals.history_hotkey_triggered.connect(self._show_history)
@@ -1792,6 +1836,7 @@ class NeuraTypeWindow(QMainWindow):
             on_hotkey_triggered=lambda: self._signals.hotkey_triggered.emit(),
             on_hold_release=lambda: self._signals.hold_release.emit(),
             on_cancel_hotkey_triggered=lambda: self._signals.cancel_hotkey_triggered.emit(),
+            on_pause_hotkey_triggered=lambda: self._signals.pause_hotkey_triggered.emit(),
             on_predownload_progress=lambda n, i, t: self._signals.predownload_progress.emit(n, i, t),
             on_silence_detected=lambda: self._signals.silence_detected.emit(),
             on_history_hotkey_triggered=lambda: self._signals.history_hotkey_triggered.emit(),
@@ -1804,6 +1849,11 @@ class NeuraTypeWindow(QMainWindow):
         self._apply_saved_settings()
         self._refresh_mic_list()
         self._apply_saved_mic()
+
+        # Sync Multiple Speakers checkbox from saved settings
+        self._multi_speaker_cb.blockSignals(True)
+        self._multi_speaker_cb.setChecked(self.backend.settings.get("speaker_diarization", False))
+        self._multi_speaker_cb.blockSignals(False)
 
         # Show Play button and seek bar on startup if a previous recording is on disk
         if self.backend.has_last_audio():
@@ -1940,18 +1990,17 @@ class NeuraTypeWindow(QMainWindow):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
-        self._file_btn = QPushButton("Transcribe File")
-        self._file_btn.setObjectName("secondary")
-        self._file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._file_btn.setEnabled(False)  # enabled once model loads
-        self._file_btn.clicked.connect(self._transcribe_from_file)
-        btn_row.addWidget(self._file_btn)
-
         settings_btn = QPushButton("Settings")
         settings_btn.setObjectName("secondary")
         settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         settings_btn.clicked.connect(self._open_settings)
         btn_row.addWidget(settings_btn)
+
+        quit_btn = QPushButton("Quit")
+        quit_btn.setObjectName("secondary")
+        quit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        quit_btn.clicked.connect(self._quit_app)
+        btn_row.addWidget(quit_btn)
 
         self._gpu_btn = QPushButton("Release GPU")
         self._gpu_btn.setObjectName("secondary")
@@ -1984,6 +2033,19 @@ class NeuraTypeWindow(QMainWindow):
 
         btn_row.addStretch()
         btn_row.addWidget(self._record_btn)
+
+        self._pause_btn = QPushButton("Pause")
+        self._pause_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pause_btn.setEnabled(False)
+        self._pause_btn.setVisible(False)
+        tp = THEMES.get(_current_theme, THEMES["dark"])
+        self._pause_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {tp['BUTTON_BG']}; color: {tp['TEXT_SECONDARY']}; "
+            f"font-size: 13px; font-weight: 600; padding: 10px 22px; border-radius: 10px; border: 1px solid {tp['BORDER']}; }}"
+            f"QPushButton:hover {{ background-color: {tp['BUTTON_HOVER']}; color: {tp['TEXT_PRIMARY']}; border-color: {tp['AMBER']}; }}"
+        )
+        self._pause_btn.clicked.connect(self._toggle_pause)
+        btn_row.addWidget(self._pause_btn)
 
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2051,6 +2113,18 @@ class NeuraTypeWindow(QMainWindow):
         history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         history_btn.clicked.connect(self._show_history)
         header.addWidget(history_btn)
+
+        self._file_btn = QPushButton("Transcribe File")
+        self._file_btn.setObjectName("secondary")
+        self._file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._file_btn.setEnabled(False)
+        self._file_btn.clicked.connect(self._transcribe_from_file)
+        header.addWidget(self._file_btn)
+
+        self._multi_speaker_cb = QCheckBox("Multiple Speakers")
+        self._multi_speaker_cb.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._multi_speaker_cb.stateChanged.connect(self._on_multi_speaker_toggled)
+        header.addWidget(self._multi_speaker_cb)
 
         lay.addLayout(header)
 
@@ -2173,7 +2247,7 @@ class NeuraTypeWindow(QMainWindow):
         self._indicator.hide_indicator()
         self._save_settings()
         self.backend.cleanup()
-        QApplication.quit()
+        os._exit(0)
 
     # ------------------------------------------------------------------
     # Backend callbacks
@@ -2257,6 +2331,10 @@ class NeuraTypeWindow(QMainWindow):
     def _repaste(self):
         """Re-paste last transcription (CHG020)."""
         self.backend.repaste_last()
+
+    def _on_multi_speaker_toggled(self, state):
+        self.backend.settings["speaker_diarization"] = bool(state)
+        save_settings(self.backend.settings)
 
     def _retry_transcription(self):
         """Retry last transcription (CHG009)."""
@@ -2392,6 +2470,11 @@ class NeuraTypeWindow(QMainWindow):
             self._record_btn.setEnabled(False)
             self.backend.load_model(s["model"])
 
+        # Sync the Multiple Speakers checkbox with saved settings
+        self._multi_speaker_cb.blockSignals(True)
+        self._multi_speaker_cb.setChecked(s.get("speaker_diarization", False))
+        self._multi_speaker_cb.blockSignals(False)
+
         # Update indicator setting
         self._indicator_enabled = s.get("recording_indicator", True)
         if not self._indicator_enabled:
@@ -2409,6 +2492,11 @@ class NeuraTypeWindow(QMainWindow):
             self.backend.unregister_cancel_hotkey()
             self.backend.current_cancel_hotkey = s["cancel_hotkey"]
             self.backend.register_cancel_hotkey()
+
+        if s.get("pause_hotkey") != self.backend.current_pause_hotkey:
+            self.backend.unregister_pause_hotkey()
+            self.backend.current_pause_hotkey = s["pause_hotkey"]
+            self.backend.register_pause_hotkey()
 
         # Re-register extra hotkeys (old ones already unregistered in _save_and_close)
         self.backend.register_repaste_hotkey()
@@ -2478,6 +2566,9 @@ class NeuraTypeWindow(QMainWindow):
         self._start_btn_glow()
         self._cancel_btn.setEnabled(True)
         self._cancel_btn.setVisible(True)
+        self._pause_btn.setText("Pause")
+        self._pause_btn.setEnabled(True)
+        self._pause_btn.setVisible(True)
         self._file_btn.setEnabled(False)
         self._waveform.start()
         if self._indicator_enabled:
@@ -2488,6 +2579,8 @@ class NeuraTypeWindow(QMainWindow):
         self._reset_record_btn()
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.setVisible(False)
+        self._pause_btn.setEnabled(False)
+        self._pause_btn.setVisible(False)
         self._indicator.hide_indicator()
         self._waveform.stop()
         self._waveform_timer.stop()
@@ -2499,6 +2592,8 @@ class NeuraTypeWindow(QMainWindow):
         self._reset_record_btn()
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.setVisible(False)
+        self._pause_btn.setEnabled(False)
+        self._pause_btn.setVisible(False)
         self._file_btn.setEnabled(True)
         self._indicator.hide_indicator()
         self._waveform.stop()
@@ -2507,6 +2602,31 @@ class NeuraTypeWindow(QMainWindow):
         device_tag = "GPU" if DEVICE == "cuda" else "CPU"
         self._status_label.setText(f"Recording cancelled — '{self.backend.current_model_name}' on {device_tag}")
         self._status_label.setStyleSheet(f"color: {_t('AMBER')}; font-size: 12px;")
+
+    def _toggle_pause(self):
+        if not self.backend.is_recording:
+            return
+        # Debounce: the keyboard hotkey can re-fire (key-repeat) and toggle twice
+        if getattr(self, '_pause_busy', False):
+            return
+        self._pause_busy = True
+        QTimer.singleShot(300, lambda: setattr(self, '_pause_busy', False))
+        paused = self.backend.toggle_pause()
+        device_tag = "GPU" if DEVICE == "cuda" else "CPU"
+        if paused:
+            self._pause_btn.setText("Resume")
+            self._waveform.stop()
+            self._waveform_timer.stop()
+            if self._indicator_enabled:
+                self._indicator.set_level(0.0)
+            self._status_label.setText("Recording paused — press Resume to continue")
+            self._status_label.setStyleSheet(f"color: {_t('AMBER')}; font-size: 12px;")
+        else:
+            self._pause_btn.setText("Pause")
+            self._waveform.start()
+            self._waveform_timer.start()
+            self._status_label.setText(f"Recording — '{self.backend.current_model_name}' on {device_tag}")
+            self._status_label.setStyleSheet(f"color: {_t('RED')}; font-size: 12px;")
 
     def _transcribe_from_file(self):
         """Open a file dialog and transcribe the selected audio/video file."""
