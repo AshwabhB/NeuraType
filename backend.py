@@ -2355,33 +2355,6 @@ class TranscriberBackend:
             return ""
 
     @staticmethod
-    def get_active_screen_geometry():
-        """Get geometry of the screen containing the foreground window (CHG031)."""
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            class RECT(ctypes.Structure):
-                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetForegroundWindow()
-            monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
-
-            class MONITORINFO(ctypes.Structure):
-                _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
-                            ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
-
-            mi = MONITORINFO()
-            mi.cbSize = ctypes.sizeof(MONITORINFO)
-            user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
-            r = mi.rcWork
-            return {"left": r.left, "top": r.top, "right": r.right, "bottom": r.bottom}
-        except Exception:
-            return None
-
-    @staticmethod
     def set_auto_start(enabled):
         """Add/remove NeuraType from Windows startup (CHG030)."""
         try:

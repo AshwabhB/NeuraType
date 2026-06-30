@@ -33,7 +33,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QPen, QBrush, QLinearGradient,
-    QIcon, QClipboard, QPalette, QAction,
+    QIcon, QClipboard, QPalette, QAction, QCursor,
 )
 
 
@@ -566,22 +566,21 @@ class RecordingIndicator(QWidget):
         self._level = level
 
     def show_indicator(self):
-        # CHG003 / CHG031: position at bottom center of active screen
-        geo = None
+        # CHG003 / CHG031: position at bottom center of the active screen.
+        # Use Qt's per-screen logical geometry (the screen under the cursor),
+        # NOT the Win32 physical-pixel rect — mixing physical coords with Qt's
+        # logical move() placed the pill off-screen on monitors with a different
+        # DPI scaling (chopped on the smaller third monitor, or missing entirely).
+        screen = None
         try:
-            info = TranscriberBackend.get_active_screen_geometry()
-            if info:
-                geo = info
+            screen = QApplication.screenAt(QCursor.pos())
         except Exception:
-            pass
-        if geo:
-            cx = (geo["left"] + geo["right"]) // 2
-            self.move(cx - self.width() // 2, geo["bottom"] - 60)
-        else:
+            screen = None
+        if screen is None:
             screen = QApplication.primaryScreen()
-            if screen:
-                g = screen.availableGeometry()
-                self.move(g.center().x() - self.width() // 2, g.bottom() - 60)
+        if screen is not None:
+            g = screen.availableGeometry()
+            self.move(g.center().x() - self.width() // 2, g.bottom() - 60)
 
         self._tick_count = 0
         w, h = self.width(), self.height()

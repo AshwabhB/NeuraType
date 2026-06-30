@@ -19,3 +19,4 @@ A running log of notable changes to NeuraType, newest first.
 ### Fixed
 
 - **Repaste hotkey pasting multiple times** — hotkey re-registration stacked duplicate handlers, causing a single press to fire several times. Registrations are now cleared before re-adding, and hotkey refreshes are debounced to prevent runaway re-registration.
+- **Recording indicator missing or chopped on secondary monitors** — the floating pill was positioned with Win32 physical-pixel coordinates while Qt expects logical (DPI-scaled) coordinates, which pushed it off-screen on monitors with different display scaling. It now uses Qt's per-screen geometry for the screen under the cursor.
