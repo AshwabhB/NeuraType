@@ -1970,12 +1970,14 @@ class NeuraTypeWindow(QMainWindow):
 
         device_tag = "GPU" if DEVICE == "cuda" else "CPU"
         gpu_color = _t("GREEN") if DEVICE == "cuda" else _t("AMBER")
-        gpu_label = QLabel(f"  {device_tag}: {GPU_INFO}")
+        gpu_label = QLabel(f"{device_tag}: {GPU_INFO}")
+        gpu_label.setIndent(7)
         gpu_label.setFont(QFont("Segoe UI", 11))
         gpu_label.setStyleSheet(f"color: {gpu_color};")
         title_col.addWidget(gpu_label)
 
         self._hotkey_label = QLabel("")
+        self._hotkey_label.setIndent(7)
         self._hotkey_label.setFont(QFont("Segoe UI", 10))
         title_col.addWidget(self._hotkey_label)
 
