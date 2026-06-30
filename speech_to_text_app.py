@@ -3,6 +3,7 @@ import math
 import random
 import os
 import re
+import time
 import threading
 import subprocess
 import keyboard
@@ -2197,6 +2198,9 @@ class NeuraTypeWindow(QMainWindow):
         show_action = QAction("Show", self)
         show_action.triggered.connect(self._tray_show)
         menu.addAction(show_action)
+        copy_last_action = QAction("Copy Last Transcription", self)
+        copy_last_action.triggered.connect(self._copy_last_transcription)
+        menu.addAction(copy_last_action)
         history_action = QAction("History", self)
         history_action.triggered.connect(self._show_history)
         menu.addAction(history_action)
@@ -2224,8 +2228,29 @@ class NeuraTypeWindow(QMainWindow):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self._tray_show()
 
+    def _copy_last_transcription(self):
+        """Copy the last transcription to the clipboard (tray action)."""
+        ok = self.backend.copy_last()
+        if self._tray:
+            if ok:
+                self._tray.showMessage(
+                    "NeuraType", "Last transcription copied to clipboard",
+                    QSystemTrayIcon.MessageIcon.Information, 2000)
+            else:
+                self._tray.showMessage(
+                    "NeuraType", "No transcription to copy yet",
+                    QSystemTrayIcon.MessageIcon.Warning, 2000)
+
     def _refresh_hotkeys(self):
         """Manually re-register all hotkeys (tray menu action)."""
+        # Debounce: if the refresh hotkey is held (or briefly collides with
+        # another combo), this can be invoked many times in a burst. Collapse
+        # rapid repeats so we re-register at most once per second.
+        now = time.monotonic()
+        if now - getattr(self, "_last_refresh_ts", 0.0) < 1.0:
+            debug_logger.log("_refresh_hotkeys: skipped (debounced)")
+            return
+        self._last_refresh_ts = now
         debug_logger.log("_refresh_hotkeys: resetting listener...")
         try:
             # Clear ALL keyboard library state — both functions are needed

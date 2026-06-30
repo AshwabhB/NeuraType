@@ -2251,6 +2251,20 @@ class TranscriberBackend:
         if self._last_transcription:
             self._paste_text(self._last_transcription)
 
+    def copy_last(self):
+        """Copy the last transcription to the clipboard, without pasting.
+
+        Returns True if something was copied, False if there is no last
+        transcription yet (or the clipboard write failed).
+        """
+        if self._last_transcription:
+            try:
+                pyperclip.copy(self._last_transcription)
+                return True
+            except Exception as e:
+                debug_logger.log(f"copy_last FAILED: {e}")
+        return False
+
     # ------------------------------------------------------------------
     # History
     # ------------------------------------------------------------------
@@ -2447,6 +2461,15 @@ class TranscriberBackend:
         """Re-register every hotkey from scratch."""
         debug_logger.log(f"_reregister_all_hotkeys: start, hotkey={self.current_hotkey!r}, "
                          f"cancel={self.current_cancel_hotkey!r}")
+        # Clear any existing hotkey registrations first. The `keyboard` library
+        # stacks a new handler on every add_hotkey() call, so without this a
+        # repeated re-register makes each hotkey fire multiple times (e.g. the
+        # repaste hotkey pasting 3x). Starting from a clean slate keeps exactly
+        # one handler per combo.
+        try:
+            keyboard.unhook_all_hotkeys()
+        except Exception:
+            pass
         try:
             keyboard.add_hotkey(self.current_hotkey, self._hotkey_triggered_internal)
             debug_logger.log(f"_reregister_all_hotkeys: registered main hotkey OK")
