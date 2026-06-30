@@ -5,6 +5,9 @@
 
 annotated-types==0.7.0
 anyio==4.12.1
+av==17.0.1
+ctranslate2==4.7.1
+faster-whisper==1.2.1
 certifi==2026.1.4
 cffi==2.0.0
 charset-normalizer==3.4.4

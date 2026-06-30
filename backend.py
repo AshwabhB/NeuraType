@@ -13,6 +13,7 @@ import tempfile
 import os
 import sys
 import subprocess
+import shutil
 import time
 import json
 import re
@@ -72,6 +73,26 @@ WHISPER_MODELS = {
 }
 
 DEFAULT_MODEL = "turbo"
+
+# ---------------------------------------------------------------------------
+# faster-whisper (CTranslate2) engine — optional, selected via settings["engine"]
+# ---------------------------------------------------------------------------
+# Same Whisper weights as openai-whisper, run through the CTranslate2 engine:
+# ~4x faster, lower VRAM, releases GPU memory more cleanly. Accuracy is
+# effectively identical at float16 compute. Falls back to openai-whisper if the
+# package is unavailable.
+try:
+    from faster_whisper import WhisperModel as _FasterWhisperModel
+    HAS_FASTER_WHISPER = True
+except Exception:
+    HAS_FASTER_WHISPER = False
+
+# Map our short model names → faster-whisper / CTranslate2 model ids
+_FW_NAME_MAP = {
+    "tiny": "tiny", "base": "base", "small": "small",
+    "medium": "medium", "large": "large-v3", "turbo": "large-v3-turbo",
+}
+
 DEFAULT_HOTKEY = "ctrl+win"
 DEFAULT_CANCEL_HOTKEY = "ctrl+shift+space"
 DEFAULT_PAUSE_HOTKEY = "ctrl+shift+p"
@@ -195,6 +216,12 @@ DEFAULT_SETTINGS = {
     "recording_indicator": True,
     "model": DEFAULT_MODEL,
     "mic_device_name": None,
+    # Transcription engine: "faster-whisper" (CTranslate2, efficient) or "openai-whisper"
+    "engine": "faster-whisper",
+    # CTranslate2 compute type for faster-whisper. "float16" = no quality loss on
+    # GPU; coerced to "int8" automatically on CPU. "int8_float16" trades a sliver
+    # of accuracy for less VRAM.
+    "fw_compute_type": "float16",
     # CHG002 — theme
     "theme": "dark",
     # CHG004 — OpenAI
@@ -229,8 +256,9 @@ DEFAULT_SETTINGS = {
     "mic_sensitivity": 1.0,
     # CHG023
     "minimize_to_tray": True,
-    # CHG024
-    "gpu_idle_release_minutes": 0,
+    # CHG024 — release GPU VRAM after this many idle minutes (0 = never).
+    # On by default so backgrounded sessions stop hogging VRAM from games/apps.
+    "gpu_idle_release_minutes": 3,
     # CHG025
     "adaptive_model": False,
     # CHG026
@@ -1039,6 +1067,7 @@ class TranscriberBackend:
         self._fast_model = None            # CHG025
         self._gpu_released = False         # CHG024
         self._last_activity = time.time()  # CHG024
+        self.engine = self._resolve_engine()  # active transcription engine
 
         # Directories — use _DATA_DIR so models/history go to writable location
         self.model_dir = os.path.join(_DATA_DIR, "models")
@@ -1077,19 +1106,47 @@ class TranscriberBackend:
     # ------------------------------------------------------------------
     # Model management
     # ------------------------------------------------------------------
+    def _resolve_engine(self):
+        """Resolve the active engine, falling back to openai-whisper if
+        faster-whisper isn't installed."""
+        eng = self.settings.get("engine", "faster-whisper")
+        if eng == "faster-whisper" and not HAS_FASTER_WHISPER:
+            debug_logger.log("faster-whisper unavailable; falling back to openai-whisper")
+            eng = "openai-whisper"
+        return eng
+
+    def _load_engine_model(self, model_name):
+        """Load a Whisper model object for the active engine.
+
+        faster-whisper → a CTranslate2 WhisperModel (same weights, faster engine).
+        openai-whisper → the reference PyTorch model. Both expose .transcribe().
+        """
+        if self.engine == "faster-whisper":
+            ct = self.settings.get("fw_compute_type", "float16")
+            if DEVICE != "cuda" and ct in ("float16", "int8_float16"):
+                ct = "int8"  # float16 isn't supported on CPU
+            fw_name = _FW_NAME_MAP.get(model_name, model_name)
+            debug_logger.log(f"loading faster-whisper '{fw_name}' compute={ct} on {DEVICE}")
+            return _FasterWhisperModel(
+                fw_name, device=DEVICE, compute_type=ct,
+                download_root=self.model_dir,
+            )
+        return whisper.load_model(model_name, device=DEVICE, download_root=self.model_dir)
+
     def load_model(self, model_name):
         self.model_loading = True
         self.whisper_model = None
         self.current_model_name = model_name
         self._gpu_released = False
+        self.engine = self._resolve_engine()
         info = WHISPER_MODELS[model_name]
         self.on_status(f"Loading model '{model_name}' ({info['size']})...", "#f59e0b")
-        debug_logger.log(f"load_model '{model_name}' on {DEVICE}")
+        debug_logger.log(f"load_model '{model_name}' on {DEVICE} via {self.engine}")
 
         def _load():
             try:
                 t0 = time.time()
-                model = whisper.load_model(model_name, device=DEVICE, download_root=self.model_dir)
+                model = self._load_engine_model(model_name)
                 self.whisper_model = model
                 self.model_loading = False
                 self._last_activity = time.time()
@@ -1133,8 +1190,32 @@ class TranscriberBackend:
     # ------------------------------------------------------------------
     # Model inventory and deletion
     # ------------------------------------------------------------------
+    def _fw_cached_dirs(self):
+        """CTranslate2 model cache folders under model_dir (HF snapshot format)."""
+        try:
+            return [
+                d for d in os.listdir(self.model_dir)
+                if os.path.isdir(os.path.join(self.model_dir, d))
+                and "faster-whisper" in d.lower()
+            ]
+        except OSError:
+            return []
+
+    def _fw_dir_matches(self, name, dirname):
+        """Whether a CT2 cache folder corresponds to our short model name."""
+        dl = dirname.lower()
+        if name == "large":          # large → large-v3, but NOT large-v3-turbo
+            return "large-v3" in dl and "turbo" not in dl
+        if name == "turbo":
+            return "turbo" in dl
+        return _FW_NAME_MAP.get(name, name).lower() in dl
+
     def get_downloaded_whisper_models(self):
         """Return list of Whisper model names that exist on disk."""
+        if self._resolve_engine() == "faster-whisper":
+            dirs = self._fw_cached_dirs()
+            return [n for n in WHISPER_MODELS
+                    if any(self._fw_dir_matches(n, d) for d in dirs)]
         downloaded = []
         for name in WHISPER_MODELS:
             try:
@@ -1159,6 +1240,16 @@ class TranscriberBackend:
         if name == self.current_model_name:
             print(f"Cannot delete active Whisper model '{name}'")
             return False
+        if self._resolve_engine() == "faster-whisper":
+            removed = False
+            for d in self._fw_cached_dirs():
+                if self._fw_dir_matches(name, d):
+                    try:
+                        shutil.rmtree(os.path.join(self.model_dir, d))
+                        removed = True
+                    except OSError as e:
+                        print(f"Failed to delete faster-whisper model '{name}': {e}")
+            return removed
         try:
             url = whisper._MODELS[name]
             fname = os.path.basename(url)
@@ -1192,11 +1283,10 @@ class TranscriberBackend:
         if not self._gpu_released and self.whisper_model is not None:
             return True
         self._gpu_released = False
+        self.engine = self._resolve_engine()
         self.on_status(f"Reloading '{self.current_model_name}'...", "#f59e0b")
         try:
-            self.whisper_model = whisper.load_model(
-                self.current_model_name, device=DEVICE, download_root=self.model_dir,
-            )
+            self.whisper_model = self._load_engine_model(self.current_model_name)
             self._last_activity = time.time()
             return True
         except Exception as e:
@@ -1211,10 +1301,18 @@ class TranscriberBackend:
             while self.model_loading:
                 time.sleep(0.5)
             remaining = [m for m in selected if m != self.current_model_name and m in WHISPER_MODELS]
+            use_fw = self._resolve_engine() == "faster-whisper"
             for i, name in enumerate(remaining, 1):
                 self.on_predownload_progress(name, i, len(remaining))
                 try:
-                    whisper._download(whisper._MODELS[name], self.model_dir, False)
+                    if use_fw:
+                        # Instantiate to trigger the CTranslate2 download, then release
+                        _m = self._load_engine_model(name)
+                        del _m
+                        if DEVICE == "cuda":
+                            torch.cuda.empty_cache()
+                    else:
+                        whisper._download(whisper._MODELS[name], self.model_dir, False)
                 except Exception:
                     pass
             self.on_status(f"Selected models cached — '{self.current_model_name}' active", "#10b981")
@@ -1664,7 +1762,9 @@ class TranscriberBackend:
     # ------------------------------------------------------------------
     def _build_whisper_kwargs(self):
         """Build the kwargs dict for whisper.transcribe()."""
-        kwargs = {"fp16": (DEVICE == "cuda")}
+        # fp16 is an openai-whisper arg; faster-whisper sets precision via
+        # compute_type at load time and rejects unknown kwargs.
+        kwargs = {} if self.engine == "faster-whisper" else {"fp16": (DEVICE == "cuda")}
         # Encourage proper punctuation
         kwargs["initial_prompt"] = (
             "Hello, welcome. This is a properly punctuated transcript "
@@ -1685,8 +1785,27 @@ class TranscriberBackend:
                 kwargs["language"] = code
         return kwargs
 
+    def _run_faster_whisper(self, model, audio, kwargs):
+        """Run faster-whisper transcription. `audio` may be a path or a 16kHz
+        mono float32 numpy array. Returns (text, elapsed)."""
+        t_start = time.time()
+        fw_kwargs = {
+            "initial_prompt": kwargs.get("initial_prompt"),
+            "condition_on_previous_text": kwargs.get("condition_on_previous_text", False),
+        }
+        if "language" in kwargs:
+            fw_kwargs["language"] = kwargs["language"]
+        debug_logger.log("_run_faster_whisper starting transcribe ...")
+        segments, _info = model.transcribe(audio, **fw_kwargs)
+        text = "".join(seg.text for seg in segments).strip()  # generator → realize here
+        elapsed = time.time() - t_start
+        debug_logger.log(f"_run_faster_whisper done in {elapsed:.2f}s, text={text[:80]!r}")
+        return text, elapsed
+
     def _run_whisper(self, model, audio_path, kwargs):
         """Run whisper.transcribe with INC001 retry logic. Returns (text, elapsed)."""
+        if self.engine == "faster-whisper":
+            return self._run_faster_whisper(model, audio_path, kwargs)
         _RETRYABLE = ("key.size", "reshape tensor", "cannot reshape",
                       "expected", "dimension", "size mismatch")
         _CUDA_FATAL = ("cuda error", "cuda", "cudnn", "cublas",
@@ -1748,10 +1867,7 @@ class TranscriberBackend:
             except Exception:
                 pass
             debug_logger.log("_recover_cuda: reloading model")
-            self.whisper_model = whisper.load_model(
-                self.current_model_name, device=DEVICE,
-                download_root=self.model_dir,
-            )
+            self.whisper_model = self._load_engine_model(self.current_model_name)
             self._last_activity = time.time()
             debug_logger.log("_recover_cuda: model reloaded OK")
             self.on_status("GPU recovered — retrying transcription...", "#f59e0b")
@@ -1771,9 +1887,7 @@ class TranscriberBackend:
         if use_fast:
             if self._fast_model is None:
                 try:
-                    self._fast_model = whisper.load_model(
-                        "tiny", device=DEVICE, download_root=self.model_dir
-                    )
+                    self._fast_model = self._load_engine_model("tiny")
                 except Exception:
                     use_fast = False
         return self._fast_model if use_fast and self._fast_model else self.whisper_model
@@ -1836,13 +1950,12 @@ class TranscriberBackend:
         model = self._pick_model(duration_secs)
 
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp_path = tmp.name
-            sf.write(tmp_path, audio_array, self.sample_rate)
+            # Feed the recording straight from memory — it is already 16kHz mono
+            # float32, which both engines accept, so no temp WAV round-trip.
+            audio_input = np.asarray(audio_array, dtype=np.float32).reshape(-1)
 
             kwargs = self._build_whisper_kwargs()
-            transcription, t_elapsed = self._run_whisper(model, tmp_path, kwargs)
-            os.remove(tmp_path)
+            transcription, t_elapsed = self._run_whisper(model, audio_input, kwargs)
 
             transcription = self._postprocess_transcription(
                 transcription, t_elapsed, do_paste=True

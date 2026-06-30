@@ -723,6 +723,14 @@ class SettingsWindow(QDialog):
             if name in selected_whisper:
                 self._model_combo.addItem(name)
         gl2.addWidget(self._model_combo)
+        gl2.addSpacing(16)
+        gl2.addWidget(QLabel("Engine:"))
+        self._engine_combo = StyledComboBox()
+        # faster-whisper: same weights, CTranslate2 engine — faster, lower VRAM,
+        # frees GPU memory more cleanly. openai-whisper kept as instant fallback.
+        self._engine_combo.addItem("faster-whisper (efficient)", "faster-whisper")
+        self._engine_combo.addItem("openai-whisper (original)", "openai-whisper")
+        gl2.addWidget(self._engine_combo)
         gl2.addStretch()
         lay.addWidget(g2)
 
@@ -1173,6 +1181,8 @@ class SettingsWindow(QDialog):
         s = self.backend.settings
         self._theme_combo.setCurrentText(s.get("theme", "dark"))
         self._model_combo.setCurrentText(s.get("model", "turbo"))
+        eng_idx = self._engine_combo.findData(s.get("engine", "faster-whisper"))
+        self._engine_combo.setCurrentIndex(eng_idx if eng_idx >= 0 else 0)
         self._refresh_mics()
         saved_mic = s.get("mic_device_name")
         if saved_mic:
@@ -1435,6 +1445,7 @@ class SettingsWindow(QDialog):
         s = self.backend.settings
         s["theme"] = self._theme_combo.currentText()
         s["model"] = self._model_combo.currentText()
+        s["engine"] = self._engine_combo.currentData()
         # Mic
         idx = self._mic_combo.currentIndex()
         if hasattr(self, '_mic_devices') and 0 <= idx < len(self._mic_devices):
@@ -2465,8 +2476,9 @@ class NeuraTypeWindow(QMainWindow):
                 w.style().polish(w)
                 w.update()
 
-        # Update model if changed
-        if s.get("model") != self.backend.current_model_name:
+        # Update model if model OR engine changed (load_model re-resolves the engine)
+        if (s.get("model") != self.backend.current_model_name
+                or s.get("engine") != self.backend.engine):
             self._record_btn.setEnabled(False)
             self.backend.load_model(s["model"])
 

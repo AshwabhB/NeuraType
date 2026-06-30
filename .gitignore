@@ -55,3 +55,4 @@ NeuraType_Portable_Packaging_Plan.md
 # Environment / API key files
 .env
 .env.*
+"models/" 
