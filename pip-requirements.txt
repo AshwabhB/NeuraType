@@ -1,7 +1,7 @@
 # NeuraType — Pinned Dependencies
 # Install:  pip install -r pip-requirements.txt
-# Note: torch requires CUDA 12.6 — install separately:
-#   pip install torch==2.10.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+# Note: torch requires CUDA 12.1 — install separately:
+#   pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 
 annotated-types==0.7.0
 anyio==4.12.1

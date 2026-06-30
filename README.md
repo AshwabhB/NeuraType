@@ -1,6 +1,6 @@
 # NeuraType
 
-Offline speech-to-text for Windows with a global hotkey. Press a key combo from any app, speak, press again — your words are transcribed and pasted automatically. Powered by [OpenAI Whisper](https://github.com/openai/whisper), running entirely on your machine.
+Offline speech-to-text for Windows with a global hotkey. Press a key combo from any app, speak, press again — your words are transcribed and pasted automatically. Powered by [OpenAI Whisper](https://github.com/openai/whisper) models, accelerated with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2), running entirely on your machine.
 
 ## Features
 
@@ -50,37 +50,20 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 Skip the line above if you only have a CPU — the app will fall back automatically.
 
-### 4. Download a Whisper model
+### 4. Choose a Whisper model
 
-Models are not included in this repository. Download one and place it in the `models/` folder.
+NeuraType uses the **faster-whisper (CTranslate2)** engine by default. Models are **downloaded automatically** on first use into the `models/` folder — there is no manual download step. Just select a model in the app and start transcribing; the first run fetches it.
 
-| Model | File | Size | Notes |
-|---|---|---|---|
-| tiny | `tiny.pt` | 75 MB | Fastest, lower accuracy |
-| base | `base.pt` | 145 MB | Good for simple dictation |
-| small | `small.pt` | 484 MB | Balanced |
-| medium | `medium.pt` | 1.5 GB | Higher accuracy |
-| **turbo** | `large-v3-turbo.pt` | 1.6 GB | **Recommended** — best speed/accuracy |
-| large | `large-v3.pt` | 3.1 GB | Highest accuracy, slow on CPU |
+| Model | Size | Notes |
+|---|---|---|
+| tiny | ~39 MB | Fastest, basic accuracy |
+| base | ~74 MB | Fast, decent accuracy |
+| small | ~244 MB | Moderate speed, good accuracy |
+| medium | ~769 MB | Slower, very good accuracy |
+| **turbo** | ~1.5 GB | **Recommended** — best speed/accuracy |
+| large | ~1.5 GB | Slowest, best accuracy |
 
-Download links (official Whisper releases):
-
-```
-https://openaipublic.azureedge.net/main/whisper/models/tiny.pt
-https://openaipublic.azureedge.net/main/whisper/models/base.pt
-https://openaipublic.azureedge.net/main/whisper/models/small.pt
-https://openaipublic.azureedge.net/main/whisper/models/medium.pt
-https://openaipublic.azureedge.net/main/whisper/models/large-v3-turbo.pt
-https://openaipublic.azureedge.net/main/whisper/models/large-v3.pt
-```
-
-Place the downloaded `.pt` file inside the `models/` folder:
-
-```
-neuratype/
-└── models/
-    └── large-v3-turbo.pt   ← here
-```
+> **Using the `openai-whisper` fallback engine?** That engine uses OpenAI's original `.pt` model files instead of the CTranslate2 format. They also download automatically on first use, or you can drop a `.pt` file into the `models/` folder manually. Switch engines with the `engine` setting (`faster-whisper` or `openai-whisper`).
 
 ### 5. Run the app
 

@@ -55,4 +55,9 @@ NeuraType_Portable_Packaging_Plan.md
 # Environment / API key files
 .env
 .env.*
-"models/" 
+
+# Whisper / CTranslate2 model cache (large binaries)
+models/
+
+# Changelog (exception to the *.md rule above)
+!CHANGELOG.md
