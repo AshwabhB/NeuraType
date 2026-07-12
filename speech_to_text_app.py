@@ -11,7 +11,9 @@ import keyboard
 # IMPORTANT: Import backend BEFORE PyQt6 to avoid DLL conflicts.
 from backend import (
     TranscriberBackend, WHISPER_MODELS, DEFAULT_MODEL, DEFAULT_HOTKEY,
-    DEFAULT_CANCEL_HOTKEY, DEFAULT_PAUSE_HOTKEY, DEVICE, GPU_INFO, SUPPORTED_LANGUAGES,
+    DEFAULT_CANCEL_HOTKEY, DEFAULT_PAUSE_HOTKEY, DEFAULT_REFRESH_HOTKEY,
+    dedupe_hotkey_settings,
+    DEVICE, GPU_INFO, SUPPORTED_LANGUAGES,
     HAS_OPENAI, load_settings, save_settings, _BASE_DIR, _DATA_DIR,
     LOCAL_LLM_MODELS, DEFAULT_LOCAL_LLM_MODEL,
     is_first_boot, mark_first_boot_done,
@@ -1200,7 +1202,7 @@ class SettingsWindow(QDialog):
         self._pause_hk_input.setText(s.get("pause_hotkey", DEFAULT_PAUSE_HOTKEY))
         self._repaste_hk_input.setText(s.get("repaste_hotkey", "alt+shift+z"))
         self._history_hk_input.setText(s.get("history_hotkey", "ctrl+shift+h"))
-        self._refresh_hk_input.setText(s.get("refresh_hotkey", "ctrl+alt+z"))
+        self._refresh_hk_input.setText(s.get("refresh_hotkey", DEFAULT_REFRESH_HOTKEY))
         self._mode_combo.setCurrentText(s.get("hotkey_mode", "toggle"))
         self._hk_enabled_cb.setChecked(s.get("hotkey_enabled", True))
         self._auto_paste_cb.setChecked(s.get("auto_paste", True))
@@ -1463,7 +1465,19 @@ class SettingsWindow(QDialog):
         s["pause_hotkey"] = self._pause_hk_input.text().strip() or DEFAULT_PAUSE_HOTKEY
         s["repaste_hotkey"] = self._repaste_hk_input.text().strip() or "alt+shift+z"
         s["history_hotkey"] = self._history_hk_input.text().strip() or "ctrl+shift+h"
-        s["refresh_hotkey"] = self._refresh_hk_input.text().strip() or "ctrl+alt+z"
+        s["refresh_hotkey"] = self._refresh_hk_input.text().strip() or DEFAULT_REFRESH_HOTKEY
+        # Two hotkeys sharing one combo is destructive (a refresh combo equal
+        # to the record combo tears down all hooks on every recording press),
+        # so resolve collisions before anything gets registered.
+        if dedupe_hotkey_settings(s):
+            self._repaste_hk_input.setText(s["repaste_hotkey"])
+            self._history_hk_input.setText(s["history_hotkey"])
+            self._refresh_hk_input.setText(s["refresh_hotkey"])
+            QMessageBox.warning(
+                self, "Hotkey Conflict",
+                "Two hotkeys shared the same key combination. The duplicate "
+                "was reset to its default (or disabled if the default is "
+                "also taken).")
         s["hotkey_mode"] = self._mode_combo.currentText()
         s["hotkey_enabled"] = self._hk_enabled_cb.isChecked()
         s["auto_paste"] = self._auto_paste_cb.isChecked()
@@ -1501,7 +1515,7 @@ class SettingsWindow(QDialog):
         # Unregister old repaste/history/refresh hotkeys using OLD values before overwriting
         _old_repaste = self.backend.settings.get("repaste_hotkey", "alt+shift+z")
         _old_history = self.backend.settings.get("history_hotkey", "ctrl+shift+h")
-        _old_refresh = self.backend.settings.get("refresh_hotkey", "ctrl+alt+z")
+        _old_refresh = self.backend.settings.get("refresh_hotkey", DEFAULT_REFRESH_HOTKEY)
         for _hk in (_old_repaste, _old_history, _old_refresh):
             try:
                 keyboard.remove_hotkey(_hk)
@@ -2252,32 +2266,23 @@ class NeuraTypeWindow(QMainWindow):
             debug_logger.log("_refresh_hotkeys: skipped (debounced)")
             return
         self._last_refresh_ts = now
-        debug_logger.log("_refresh_hotkeys: resetting listener...")
+        debug_logger.log("_refresh_hotkeys: re-registering...")
         try:
-            # Clear ALL keyboard library state — both functions are needed
+            # Non-destructive: clear handler registrations only. Never reset
+            # listener.listening — that made the next add_hotkey() spawn a
+            # second listener thread with a second Windows hook while the old
+            # one kept running, so hooks stacked up on every refresh (N hooks
+            # = every hotkey firing N times, then Windows silently removing
+            # the slowed-down hooks entirely).
             keyboard.unhook_all()
-            keyboard.unhook_all_hotkeys()
-            listener = getattr(keyboard, '_listener', None)
-            if listener is not None:
-                # Reset listener state so start_if_necessary() recreates threads
-                # and re-installs the Windows hook
-                listener.listening = False
-                # Reset internal hotkey state dicts so old combos can't fire
-                for attr in ('blocking_hotkeys', 'nonblocking_hotkeys',
-                             'blocking_keys', 'nonblocking_keys',
-                             'filtered_modifiers', 'modifier_states'):
-                    d = getattr(listener, attr, None)
-                    if d is not None:
-                        try:
-                            d.clear()
-                        except Exception:
-                            pass
-                if hasattr(listener, 'handlers'):
-                    listener.handlers.clear()
-            debug_logger.log("_refresh_hotkeys: listener reset OK")
+            debug_logger.log("_refresh_hotkeys: handlers cleared OK")
         except Exception as e:
-            debug_logger.log(f"_refresh_hotkeys: reset FAILED: {e}")
+            debug_logger.log(f"_refresh_hotkeys: clear FAILED: {e}")
         self.backend._reregister_all_hotkeys()
+        # If the OS-level hook is genuinely dead this re-register alone can't
+        # revive it; force the watchdog to probe on its next tick, which
+        # detects a dead hook and safely restarts the listener.
+        self.backend._last_kb_event = 0.0
         self._on_status("Hotkeys refreshed", "#10b981")
 
     def _quit_app(self):

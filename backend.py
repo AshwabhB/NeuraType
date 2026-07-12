@@ -96,6 +96,7 @@ _FW_NAME_MAP = {
 DEFAULT_HOTKEY = "ctrl+win"
 DEFAULT_CANCEL_HOTKEY = "ctrl+shift+space"
 DEFAULT_PAUSE_HOTKEY = "ctrl+shift+p"
+DEFAULT_REFRESH_HOTKEY = "ctrl+alt+r"
 
 # ---------------------------------------------------------------------------
 # Local LLM model catalogue — smallest first
@@ -273,7 +274,7 @@ DEFAULT_SETTINGS = {
     # CHG032
     "history_hotkey": "ctrl+shift+h",
     # Refresh hotkeys shortcut
-    "refresh_hotkey": "ctrl+alt+z",
+    "refresh_hotkey": DEFAULT_REFRESH_HOTKEY,
     # CHG7: local LLM
     "use_local_llm": False,
     "local_llm_model": DEFAULT_LOCAL_LLM_MODEL,
@@ -350,6 +351,52 @@ class DebugLogger:
 debug_logger = DebugLogger()
 
 
+def normalize_combo(hk):
+    """Canonical form of a hotkey combo so 'ctrl+alt+z' == 'alt+ctrl+z'."""
+    if not hk:
+        return ""
+    return "+".join(sorted(p.strip().lower() for p in str(hk).split("+") if p.strip()))
+
+
+def dedupe_hotkey_settings(settings):
+    """Resolve hotkey collisions in-place; returns True if anything changed.
+
+    The main/cancel/pause hotkeys win. If a secondary hotkey (repaste,
+    history, refresh) collides with an earlier one it is reset to its
+    default, or disabled if the default also collides. A collision here is
+    dangerous: the refresh hotkey nukes and re-registers all hooks, so a
+    refresh combo equal to the record combo tears the listener down on
+    every recording press.
+    """
+    order = [
+        ("hotkey", DEFAULT_HOTKEY),
+        ("cancel_hotkey", DEFAULT_CANCEL_HOTKEY),
+        ("pause_hotkey", DEFAULT_PAUSE_HOTKEY),
+        ("repaste_hotkey", "alt+shift+z"),
+        ("history_hotkey", "ctrl+shift+h"),
+        ("refresh_hotkey", DEFAULT_REFRESH_HOTKEY),
+    ]
+    changed = False
+    seen = set()
+    for key, default in order:
+        combo = normalize_combo(settings.get(key))
+        if not combo:
+            continue
+        if combo in seen:
+            fallback = normalize_combo(default)
+            if fallback not in seen:
+                settings[key] = default
+                seen.add(fallback)
+            else:
+                settings[key] = ""
+            changed = True
+            debug_logger.log(f"dedupe_hotkey_settings: {key} collided, reset to "
+                             f"{settings[key]!r}")
+        else:
+            seen.add(combo)
+    return changed
+
+
 def load_settings():
     """Load settings from JSON. Unknown keys are ignored; missing keys get defaults."""
     settings = dict(DEFAULT_SETTINGS)
@@ -362,6 +409,8 @@ def load_settings():
                     settings[key] = saved[key]
     except (json.JSONDecodeError, OSError, ValueError):
         pass
+    if dedupe_hotkey_settings(settings):
+        save_settings(settings)
     return settings
 
 
@@ -1059,6 +1108,7 @@ class TranscriberBackend:
         self.current_pause_hotkey = self.settings.get("pause_hotkey", DEFAULT_PAUSE_HOTKEY)
         self.hotkey_enabled = self.settings["hotkey_enabled"]
         self.auto_paste = self.settings["auto_paste"]
+        self._last_kb_event = time.time()  # updated by the watchdog's probe hook
 
         # Whisper model state
         self.whisper_model = None
@@ -1452,10 +1502,35 @@ class TranscriberBackend:
         except Exception:
             pass
 
+    def _refresh_hotkey_conflict(self):
+        """Return the combo the refresh hotkey collides with, or None.
+
+        The refresh handler tears down and re-registers every hook, so it must
+        never share a combo with a working hotkey — most importantly the
+        record hotkey, where the collision destroys the listener on every
+        single recording press.
+        """
+        hk = normalize_combo(self.settings.get("refresh_hotkey", DEFAULT_REFRESH_HOTKEY))
+        if not hk:
+            return None
+        others = (self.current_hotkey, self.current_cancel_hotkey,
+                  self.current_pause_hotkey,
+                  self.settings.get("repaste_hotkey", "alt+shift+z"),
+                  self.settings.get("history_hotkey", "ctrl+shift+h"))
+        for other in others:
+            if other and normalize_combo(other) == hk:
+                return other
+        return None
+
     def register_refresh_hotkey(self):
         """Register hotkey that re-registers all hotkeys (useful after sleep/wake)."""
-        hk = self.settings.get("refresh_hotkey", "ctrl+alt+z")
+        hk = self.settings.get("refresh_hotkey", DEFAULT_REFRESH_HOTKEY)
         if not hk:
+            return False
+        conflict = self._refresh_hotkey_conflict()
+        if conflict:
+            debug_logger.log(f"register_refresh_hotkey SKIPPED: {hk!r} collides "
+                             f"with {conflict!r}")
             return False
         try:
             keyboard.add_hotkey(hk, lambda: self.on_refresh_hotkey_triggered())
@@ -1467,13 +1542,34 @@ class TranscriberBackend:
 
     def unregister_refresh_hotkey(self):
         try:
-            keyboard.remove_hotkey(self.settings.get("refresh_hotkey", "ctrl+alt+z"))
+            keyboard.remove_hotkey(self.settings.get("refresh_hotkey", DEFAULT_REFRESH_HOTKEY))
         except Exception:
             pass
 
+    def _combo_conflict_label(self, new_hotkey, exclude):
+        """Name of the assigned hotkey `new_hotkey` collides with, or None.
+
+        `exclude` is the label of the hotkey being changed (ignored in the
+        comparison).
+        """
+        assigned = {
+            "Start/Stop": self.current_hotkey,
+            "Cancel": self.current_cancel_hotkey,
+            "Pause": self.current_pause_hotkey,
+            "Re-paste": self.settings.get("repaste_hotkey", "alt+shift+z"),
+            "History": self.settings.get("history_hotkey", "ctrl+shift+h"),
+            "Refresh Hotkeys": self.settings.get("refresh_hotkey", DEFAULT_REFRESH_HOTKEY),
+        }
+        combo = normalize_combo(new_hotkey)
+        for label, other in assigned.items():
+            if label != exclude and other and normalize_combo(other) == combo:
+                return label
+        return None
+
     def change_hotkey(self, new_hotkey):
-        if new_hotkey.strip().lower() == self.current_cancel_hotkey.strip().lower():
-            return False, "Start/Stop hotkey cannot be the same as Cancel hotkey."
+        conflict = self._combo_conflict_label(new_hotkey, "Start/Stop")
+        if conflict:
+            return False, f"Start/Stop hotkey cannot be the same as {conflict} hotkey."
         self.unregister_hotkey()
         try:
             keyboard.add_hotkey(new_hotkey, self._hotkey_triggered_internal)
@@ -1487,8 +1583,9 @@ class TranscriberBackend:
             return False, str(e)
 
     def change_cancel_hotkey(self, new_hotkey):
-        if new_hotkey.strip().lower() == self.current_hotkey.strip().lower():
-            return False, "Cancel hotkey cannot be the same as Start/Stop hotkey."
+        conflict = self._combo_conflict_label(new_hotkey, "Cancel")
+        if conflict:
+            return False, f"Cancel hotkey cannot be the same as {conflict} hotkey."
         self.unregister_cancel_hotkey()
         try:
             keyboard.add_hotkey(new_hotkey, self._cancel_hotkey_triggered_internal)
@@ -1502,11 +1599,9 @@ class TranscriberBackend:
             return False, str(e)
 
     def change_pause_hotkey(self, new_hotkey):
-        nh = new_hotkey.strip().lower()
-        if nh == self.current_hotkey.strip().lower():
-            return False, "Pause hotkey cannot be the same as Start/Stop hotkey."
-        if nh == self.current_cancel_hotkey.strip().lower():
-            return False, "Pause hotkey cannot be the same as Cancel hotkey."
+        conflict = self._combo_conflict_label(new_hotkey, "Pause")
+        if conflict:
+            return False, f"Pause hotkey cannot be the same as {conflict} hotkey."
         self.unregister_pause_hotkey()
         try:
             keyboard.add_hotkey(new_hotkey, self._pause_hotkey_triggered_internal)
@@ -2387,7 +2482,55 @@ class TranscriberBackend:
     def start_hotkey_watchdog(self):
         """Start a background thread that periodically checks hotkey health."""
         self._hotkey_watchdog_running = True
+        self._last_kb_event = time.time()
+        self._install_probe_hook()
         threading.Thread(target=self._hotkey_watchdog, daemon=True).start()
+
+    def _on_probe_event(self, event):
+        self._last_kb_event = time.time()
+
+    def _install_probe_hook(self):
+        """(Re-)install the passive hook that timestamps every key event.
+
+        This is how the watchdog knows the Windows low-level hook is still
+        receiving events at all — thread liveness alone can't tell, because
+        Windows silently removes a hook that exceeds LowLevelHooksTimeout
+        while the listener's message-pump thread keeps running.
+        """
+        try:
+            keyboard.unhook(self._on_probe_event)
+        except Exception:
+            pass
+        try:
+            keyboard.hook(self._on_probe_event)
+        except Exception as e:
+            debug_logger.log(f"_install_probe_hook FAILED: {e}")
+
+    def _hook_receiving_events(self):
+        """Probe whether the OS-level keyboard hook still delivers events.
+
+        Only probes after 60s without any observed key event. Injects a
+        harmless F24 key-up via the OS; if our own hook doesn't see it, the
+        hook has been silently removed. Skipped when no window has foreground
+        (lock screen / secure desktop), where hooks legitimately go quiet.
+        """
+        if time.time() - self._last_kb_event < 60:
+            return True
+        try:
+            import ctypes
+            if ctypes.windll.user32.GetForegroundWindow() == 0:
+                return True  # locked / secure desktop — can't probe reliably
+            probe_sent = time.time()
+            KEYEVENTF_KEYUP, VK_F24 = 0x0002, 0x87
+            ctypes.windll.user32.keybd_event(VK_F24, 0, KEYEVENTF_KEYUP, 0)
+        except Exception:
+            return True  # can't probe — assume healthy rather than churn
+        deadline = probe_sent + 1.5
+        while time.time() < deadline:
+            if self._last_kb_event >= probe_sent:
+                return True
+            time.sleep(0.05)
+        return False
 
     def _hotkey_watchdog(self):
         while self._hotkey_watchdog_running:
@@ -2409,6 +2552,11 @@ class TranscriberBackend:
                     if pt and not pt.is_alive():
                         needs_restart = True
 
+                if not needs_restart and not self._hook_receiving_events():
+                    debug_logger.log("Hotkey watchdog: hook silently removed by "
+                                     "Windows (threads alive, no events) — restarting...")
+                    needs_restart = True
+
                 if needs_restart:
                     debug_logger.log("Hotkey watchdog: listener dead, force-restarting...")
                     keyboard.unhook_all()
@@ -2427,6 +2575,9 @@ class TranscriberBackend:
                         if hasattr(listener, 'handlers'):
                             listener.handlers.clear()
                     self._reregister_all_hotkeys()
+                    # Fresh hook — restart the probe clock so we don't
+                    # immediately re-probe and churn restarts.
+                    self._last_kb_event = time.time()
             except Exception as e:
                 debug_logger.log(f"Hotkey watchdog error: {e}")
 
@@ -2443,6 +2594,8 @@ class TranscriberBackend:
             keyboard.unhook_all_hotkeys()
         except Exception:
             pass
+        # The probe hook may have been dropped by a preceding unhook_all().
+        self._install_probe_hook()
         try:
             keyboard.add_hotkey(self.current_hotkey, self._hotkey_triggered_internal)
             debug_logger.log(f"_reregister_all_hotkeys: registered main hotkey OK")
@@ -2471,8 +2624,12 @@ class TranscriberBackend:
         except Exception as e:
             debug_logger.log(f"_reregister_all_hotkeys: FAILED history hotkey: {e}")
         try:
-            hk = self.settings.get("refresh_hotkey", "ctrl+alt+z")
-            if hk:
+            hk = self.settings.get("refresh_hotkey", DEFAULT_REFRESH_HOTKEY)
+            conflict = self._refresh_hotkey_conflict()
+            if conflict:
+                debug_logger.log(f"_reregister_all_hotkeys: SKIPPED refresh hotkey "
+                                 f"{hk!r} — collides with {conflict!r}")
+            elif hk:
                 keyboard.add_hotkey(hk, lambda: self.on_refresh_hotkey_triggered())
                 debug_logger.log(f"_reregister_all_hotkeys: registered refresh hotkey OK")
         except Exception as e:

@@ -2,6 +2,16 @@
 
 A running log of notable changes to NeuraType, newest first.
 
+## 2026-07-11
+
+### Fixed
+
+- **Hotkeys randomly dying (and the refresh hotkey doing nothing).** Root cause was a hotkey collision: the "Refresh Hotkeys" combo defaulted to the same combo as the record hotkey (`ctrl+alt+z`), so every recording press also ran the destructive hotkey-refresh routine. That routine reset the keyboard listener in a way that spawned an *additional* listener thread with an *additional* Windows low-level hook each time — hooks stacked up (a single press eventually fired handlers 10–12×), slowed every keystroke, and Windows then silently removed the timed-out hooks, killing all hotkeys at once. The refresh hotkey couldn't recover because it rode on the same dead hook, and the watchdog couldn't detect it because the listener threads were still alive.
+  - Refresh hotkey default changed to `ctrl+alt+r`; conflicting values in saved settings are migrated automatically at startup.
+  - Hotkey collisions are now rejected everywhere: settings save resolves duplicates, `change_*` validators check all six hotkeys against each other, and a conflicting refresh combo is skipped at registration.
+  - The manual refresh no longer resets the listener (no more hook stacking); it only clears and re-registers handlers.
+  - The watchdog now detects the "threads alive but hook silently removed" state by tracking real event flow and, after 60s of silence, injecting a harmless F24 key-up probe — if the hook doesn't see it, the listener is force-restarted. Hotkeys self-heal within ~70 seconds instead of dying until an app restart.
+
 ## 2026-06-29
 
 ### Changed
